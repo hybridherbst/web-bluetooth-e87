@@ -8,3 +8,9 @@ captured_image*
 captured_transmitted*
 session*.avi
 session*.bin
+
+# Bluetooth captures — contain device traffic
+cap.btsnoop
+cap.pklg
+cap.txt
+cap-extended*
