@@ -285,6 +285,13 @@ export async function connectE87(log?: (msg: string) => void): Promise<E87Connec
     const raw = new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
     notificationQueue.push(raw)
     if (notificationQueue.length > 200) notificationQueue.shift()
+    // Log incoming data (mirrors the original unified handler)
+    const frame = parseE87Frame(raw)
+    if (frame) {
+      log?.(`RX frame flag=0x${frame.flag.toString(16)} cmd=0x${frame.cmd.toString(16)} len=${frame.length}`)
+    } else {
+      log?.(`RX notify (${raw.length} bytes): ${toHex(raw.slice(0, Math.min(24, raw.length)))}`)
+    }
   }
 
   for (const c of chars.notify) {
@@ -386,29 +393,26 @@ export async function writeFileE87(opts: UploadOptions): Promise<void> {
   let fileCompleteAutoRespond = false
   let fileCompleteHandled = false
 
-  // Set up auto-responder for cmd 0x20
+  // Auto-responder for cmd 0x20 (FILE_COMPLETE) — the device has a tight
+  // timeout (~100ms) so we respond directly in the event handler.
   const autoResponder = (event: Event) => {
+    if (!fileCompleteAutoRespond || fileCompleteHandled) return
     const target = event.target as BluetoothRemoteGATTCharacteristic
     const value = target.value
     if (!value) return
     const raw = new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
     const frame = parseE87Frame(raw)
-    if (frame) {
-      log(`RX frame flag=0x${frame.flag.toString(16)} cmd=0x${frame.cmd.toString(16)} len=${frame.length}`)
-      if (fileCompleteAutoRespond && frame.cmd === 0x20 && frame.flag === 0xc0 && !fileCompleteHandled) {
-        fileCompleteHandled = true
-        const deviceSeq = frame.body[0] ?? 0
-        const respBody = buildFilePathResponse(deviceSeq, uploadMode)
-        const respFrame = buildE87Frame(0x00, 0x20, respBody)
-        log(`AUTO-RESPOND cmd 0x20: seq=${deviceSeq}, sending path response (${respFrame.length} bytes)`)
-        characteristic.writeValueWithoutResponse(respFrame).then(() => {
-          log('cmd 0x20 auto-response sent successfully.')
-        }).catch((err: unknown) => {
-          log(`cmd 0x20 auto-response failed: ${(err as Error).message}`)
-        })
-      }
-    } else {
-      log(`RX notify (${raw.length} bytes): ${toHex(raw.slice(0, Math.min(24, raw.length)))}`)
+    if (frame && frame.cmd === 0x20 && frame.flag === 0xc0) {
+      fileCompleteHandled = true
+      const deviceSeq = frame.body[0] ?? 0
+      const respBody = buildFilePathResponse(deviceSeq, uploadMode)
+      const respFrame = buildE87Frame(0x00, 0x20, respBody)
+      log(`AUTO-RESPOND cmd 0x20: seq=${deviceSeq}, sending path response (${respFrame.length} bytes)`)
+      characteristic.writeValueWithoutResponse(respFrame).then(() => {
+        log('cmd 0x20 auto-response sent successfully.')
+      }).catch((err: unknown) => {
+        log(`cmd 0x20 auto-response failed: ${(err as Error).message}`)
+      })
     }
   }
 
@@ -421,13 +425,6 @@ export async function writeFileE87(opts: UploadOptions): Promise<void> {
     let seqCounter = 0x00
 
     // ── AUTH ──
-    // Drain any stale notifications from previous sessions
-    if (notificationQueue.length > 0) {
-      log(`Draining ${notificationQueue.length} stale notification(s) before auth.`)
-      notificationQueue.length = 0
-    }
-    await sleep(50) // small settle delay
-
     log('Auth: Starting Jieli RCSP crypto handshake...')
     const randomAuthData = getRandomAuthData()
     log(`Auth TX: [0x00, rand*16] = ${toHex(randomAuthData)}`)

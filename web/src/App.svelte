@@ -17,7 +17,10 @@
   const debugMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('debug')
 
   // ─── BLE connection state ───
-  let conn: E87Connection | null = $state(null)
+  // MUST be $state.raw — Svelte 5's deep proxy breaks the shared
+  // notificationQueue array (onNotification pushes to the original,
+  // but writeFileE87 would poll the proxy copy → auth timeout).
+  let conn: E87Connection | null = $state.raw(null)
   let isConnecting = $state(false)
   let isWriting = $state(false)
   let cancelRequested = $state(false)
@@ -510,7 +513,7 @@
 
     <!-- Upload button -->
     <div class="row buttons" style="margin-top:0.5rem">
-      <button onclick={startUpload} disabled={!conn?.server?.connected || isWriting}>
+      <button onclick={startUpload} disabled={!conn || isWriting}>
         {isWriting ? 'Uploading…' : 'Upload'}
       </button>
     </div>
