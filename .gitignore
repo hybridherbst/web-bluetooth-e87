@@ -1,2 +1,10 @@
 apk-decompiled
 __pycache__
+.venv
+
+# Test images & captured data — confidential
+web/public/testimages/
+captured_image*
+captured_transmitted*
+session*.avi
+session*.bin
