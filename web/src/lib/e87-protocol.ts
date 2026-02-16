@@ -421,6 +421,13 @@ export async function writeFileE87(opts: UploadOptions): Promise<void> {
     let seqCounter = 0x00
 
     // ── AUTH ──
+    // Drain any stale notifications from previous sessions
+    if (notificationQueue.length > 0) {
+      log(`Draining ${notificationQueue.length} stale notification(s) before auth.`)
+      notificationQueue.length = 0
+    }
+    await sleep(50) // small settle delay
+
     log('Auth: Starting Jieli RCSP crypto handshake...')
     const randomAuthData = getRandomAuthData()
     log(`Auth TX: [0x00, rand*16] = ${toHex(randomAuthData)}`)

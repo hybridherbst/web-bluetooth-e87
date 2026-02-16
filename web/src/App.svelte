@@ -30,11 +30,10 @@
   let logs: string[] = $state([])
 
   // ─── Upload mode & file state ───
-  let uploadMode: UploadMode = $state('image')
-  let useDefaultImage = $state(true)
+  let uploadMode: UploadMode = $state('pattern')
   let selectedFile: File | null = $state(null)
   let selectedFiles: File[] = $state([])
-  let previewUrl: string | null = $state('/captured_image.jpg')
+  let previewUrl: string | null = $state(null)
 
   // ─── Mode-specific settings ───
   let videoFps = $state(12)
@@ -56,6 +55,7 @@
   let isGeneratingPattern = $state(false)
   let preparedPayload: Uint8Array | null = $state(null)
   let preparedPayloadLabel = $state('')
+  let preparedIsStillImage = $state(false)
   let aviPlayer: AviPlayer | null = $state(null)
 
   // ─── Upload progress state ───
@@ -122,8 +122,8 @@
     const input = event.target as HTMLInputElement
     const file = input.files?.[0] ?? null
     selectedFile = file
-    useDefaultImage = false
     preparedPayload = null
+    preparedIsStillImage = false
     if (file) {
       log(`Selected: ${file.name}`)
       revokePreviewUrl()
@@ -136,8 +136,8 @@
     const files = input.files
     if (!files || files.length === 0) return
     selectedFiles = Array.from(files)
-    useDefaultImage = false
     preparedPayload = null
+    preparedIsStillImage = false
     log(`Selected ${selectedFiles.length} images for sequence`)
     revokePreviewUrl()
     previewUrl = URL.createObjectURL(selectedFiles[0])
@@ -147,8 +147,8 @@
     const input = event.target as HTMLInputElement
     const file = input.files?.[0] ?? null
     selectedFile = file
-    useDefaultImage = false
     preparedPayload = null
+    preparedIsStillImage = false
     videoTrimStart = 0
     videoTrimEnd = 0
     videoDuration = 0
@@ -167,18 +167,10 @@
     }
   }
 
-  function selectDefaultImage(): void {
-    useDefaultImage = true
-    selectedFile = null
-    preparedPayload = null
-    revokePreviewUrl()
-    previewUrl = '/captured_image.jpg'
-    log('Using default captured image (ground-truth from packet capture).')
-  }
-
   function selectPattern(pat: PatternDef): void {
     selectedPattern = pat
     preparedPayload = null
+    preparedIsStillImage = false
     aviPlayer?.stop()
   }
 
@@ -187,11 +179,47 @@
     aviPlayer?.stop()
   }
 
+  // ─── Pattern still-image generation ───
+
+  async function generatePatternStill(): Promise<void> {
+    if (!selectedPattern) return
+    isGeneratingPattern = true
+    isGeneratingPreview = true
+    preparedPayload = null
+    aviPlayer?.stop()
+    aviPreviewFrames.forEach(f => f.close())
+    aviPreviewFrames = []
+
+    try {
+      // Generate a handful of frames and pick one from the middle for a representative still
+      const sampleFrames = Math.max(patternFrameCount, 30)
+      const allFrames = await selectedPattern.generate({ frames: sampleFrames, fps: patternFps })
+      // Pick a frame ~40% through — usually more visually interesting than exact center
+      const pickIdx = Math.floor(sampleFrames * 0.4)
+      const stillJpeg = allFrames[pickIdx]
+
+      preparedPayload = stillJpeg
+      preparedIsStillImage = true
+      preparedPayloadLabel = `${selectedPattern.name} still — ${formatBytes(stillJpeg.length)}`
+
+      // Show as preview image
+      revokePreviewUrl()
+      previewUrl = URL.createObjectURL(new Blob([stillJpeg], { type: 'image/jpeg' }))
+      log(`Still ready: ${selectedPattern.name} (frame ${pickIdx + 1}/${sampleFrames}), ${formatBytes(stillJpeg.length)}`)
+    } catch (err) {
+      log(`Still generation failed: ${(err as Error).message}`)
+    } finally {
+      isGeneratingPattern = false
+      isGeneratingPreview = false
+    }
+  }
+
   // ─── Preview generation ───
 
   async function generatePreview(): Promise<void> {
     isGeneratingPreview = true
     preparedPayload = null
+    preparedIsStillImage = false
     aviPlayer?.stop()
     aviPreviewFrames.forEach(f => f.close())
     aviPreviewFrames = []
@@ -246,17 +274,13 @@
 
   async function getUploadBytes(): Promise<Uint8Array> {
     if (preparedPayload) {
+      // If this is a pattern-generated still, override uploadMode so the device gets .jpg not .avi
+      if (preparedIsStillImage) uploadMode = 'image'
       log(`Using prepared payload: ${formatBytes(preparedPayload.length)}`)
       return preparedPayload
     }
 
     if (uploadMode === 'image') {
-      if (useDefaultImage) {
-        log('Loading default captured image (15647 bytes ground-truth)...')
-        const resp = await fetch('/captured_image.jpg')
-        if (!resp.ok) throw new Error('Failed to load default captured_image.jpg')
-        return new Uint8Array(await resp.arrayBuffer())
-      }
       if (!selectedFile) throw new Error('No file selected.')
       if (selectedFile.type.startsWith('image/')) {
         return imageFileTo368JpegBytes(selectedFile)
@@ -289,8 +313,8 @@
       status = 'Not connected.'
       return
     }
-    if (uploadMode === 'image' && !useDefaultImage && !selectedFile) {
-      status = 'Select an image or use the default.'
+    if (uploadMode === 'image' && !selectedFile && !preparedPayload) {
+      status = 'Select an image.'
       return
     }
     if (uploadMode === 'images' && selectedFiles.length === 0) {
@@ -385,6 +409,9 @@
   <section class="panel">
     <!-- Mode tabs -->
     <div class="row buttons mode-tabs">
+      <button class:active={uploadMode === 'pattern'} onclick={() => switchMode('pattern')} disabled={isWriting}>
+        ✨ Pattern
+      </button>
       <button class:active={uploadMode === 'image'} onclick={() => switchMode('image')} disabled={isWriting}>
         🖼 Image
       </button>
@@ -394,18 +421,25 @@
       <button class:active={uploadMode === 'video'} onclick={() => switchMode('video')} disabled={isWriting}>
         🎬 Video
       </button>
-      <button class:active={uploadMode === 'pattern'} onclick={() => switchMode('pattern')} disabled={isWriting}>
-        ✨ Pattern
-      </button>
     </div>
 
     <!-- Mode-specific content -->
-    {#if uploadMode === 'image'}
+    {#if uploadMode === 'pattern'}
+      <PatternMode
+        {isWriting}
+        {isGeneratingPreview}
+        {isGeneratingPattern}
+        {selectedPattern}
+        bind:patternFrameCount
+        bind:patternFps
+        onSelectPattern={selectPattern}
+        onGeneratePreview={generatePreview}
+        onGenerateStill={generatePatternStill}
+      />
+    {:else if uploadMode === 'image'}
       <ImageMode
         {isWriting}
         {previewUrl}
-        {useDefaultImage}
-        onSelectDefault={selectDefaultImage}
         onSelectFile={setFile}
       />
     {:else if uploadMode === 'images'}
@@ -422,7 +456,6 @@
         {isWriting}
         {isGeneratingPreview}
         {selectedFile}
-        {useDefaultImage}
         {previewUrl}
         bind:videoFps
         bind:videoTrimStart
@@ -432,17 +465,6 @@
         bind:videoZoomX
         bind:videoZoomY
         onSelectVideo={setVideoFile}
-        onGeneratePreview={generatePreview}
-      />
-    {:else if uploadMode === 'pattern'}
-      <PatternMode
-        {isWriting}
-        {isGeneratingPreview}
-        {isGeneratingPattern}
-        {selectedPattern}
-        bind:patternFrameCount
-        bind:patternFps
-        onSelectPattern={selectPattern}
         onGeneratePreview={generatePreview}
       />
     {/if}
@@ -460,6 +482,18 @@
           {#if preparedPayload && preparedPayload.length > MAX_UPLOAD_BYTES}
             <span style="color:#ff6666">⚠ {formatBytes(preparedPayload.length)} exceeds {formatBytes(MAX_UPLOAD_BYTES)} limit</span>
           {/if}
+        </p>
+      {/if}
+    {/if}
+
+    <!-- Pattern still preview -->
+    {#if uploadMode === 'pattern' && previewUrl && preparedPayload && aviPreviewFrames.length === 0}
+      <div style="text-align:center;margin:0.5rem 0">
+        <img src={previewUrl} alt="Pattern still" style="max-width:200px;max-height:200px;border:1px solid #334;border-radius:50%;aspect-ratio:1" />
+      </div>
+      {#if preparedPayloadLabel}
+        <p class="dim payload-info">
+          Ready: {preparedPayloadLabel}
         </p>
       {/if}
     {/if}

@@ -9,7 +9,6 @@
     isWriting: boolean
     isGeneratingPreview: boolean
     selectedFile: File | null
-    useDefaultImage: boolean
     previewUrl: string | null
     videoFps: number
     videoTrimStart: number
@@ -23,7 +22,7 @@
   }
 
   let {
-    isWriting, isGeneratingPreview, selectedFile, useDefaultImage, previewUrl,
+    isWriting, isGeneratingPreview, selectedFile, previewUrl,
     videoFps = $bindable(),
     videoTrimStart = $bindable(),
     videoTrimEnd = $bindable(),
@@ -51,16 +50,16 @@
 </script>
 
 <div class="image-source">
-  <label class="file-btn" class:active={selectedFile !== null && !useDefaultImage}>
+  <label class="file-btn" class:active={selectedFile !== null}>
     Select video…
     <input type="file" accept="video/*" onchange={onSelectVideo} disabled={isWriting} style="display:none" />
   </label>
-  {#if selectedFile && !useDefaultImage}
+  {#if selectedFile}
     <span class="dim" style="margin-left:0.5rem">{selectedFile.name}</span>
   {/if}
 </div>
 
-{#if selectedFile && !useDefaultImage && videoDuration > 0}
+{#if selectedFile && videoDuration > 0}
   {#if previewUrl}
     <div class="preview">
       <!-- svelte-ignore a11y_media_has_caption -->
