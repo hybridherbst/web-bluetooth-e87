@@ -5,6 +5,9 @@
   const E87_TARGET_IMAGE_BYTES = 16000
 
   import { getRandomAuthData, getEncryptedAuthData } from './jl-auth'
+  import { buildMjpgAvi } from './avi-builder'
+
+  type UploadMode = 'image' | 'images' | 'video'
 
   const SERVICE_CANDIDATES: BluetoothServiceUUID[] = [
     0xae00,
@@ -60,6 +63,9 @@
   let logs: string[] = $state([])
   let previewUrl: string | null = $state('/captured_image.jpg')
   let selectedFile: File | null = $state(null)
+  let selectedFiles: File[] = $state([])
+  let uploadMode: UploadMode = $state('image')
+  let videoFps = $state(12)
   const notificationQueue: Uint8Array[] = []
 
   // Auto-responder for cmd 0x20 (FILE_COMPLETE).
@@ -84,6 +90,29 @@
     useDefaultImage = false
     if (file) {
       log(`Selected: ${file.name}`)
+      if (previewUrl && !previewUrl.startsWith('/')) URL.revokeObjectURL(previewUrl)
+      previewUrl = URL.createObjectURL(file)
+    }
+  }
+
+  function setMultipleFiles(event: Event): void {
+    const input = event.target as HTMLInputElement
+    const files = input.files
+    if (!files || files.length === 0) return
+    selectedFiles = Array.from(files)
+    useDefaultImage = false
+    log(`Selected ${selectedFiles.length} images for sequence`)
+    if (previewUrl && !previewUrl.startsWith('/')) URL.revokeObjectURL(previewUrl)
+    previewUrl = URL.createObjectURL(selectedFiles[0])
+  }
+
+  function setVideoFile(event: Event): void {
+    const input = event.target as HTMLInputElement
+    const file = input.files?.[0] ?? null
+    selectedFile = file
+    useDefaultImage = false
+    if (file) {
+      log(`Selected video: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`)
       if (previewUrl && !previewUrl.startsWith('/')) URL.revokeObjectURL(previewUrl)
       previewUrl = URL.createObjectURL(file)
     }
@@ -207,7 +236,8 @@
   function buildFilePathResponse(deviceSeq: number): Uint8Array {
     const now20 = new Date()
     const dateStr = `${now20.getFullYear()}${String(now20.getMonth() + 1).padStart(2, '0')}${String(now20.getDate()).padStart(2, '0')}${String(now20.getHours()).padStart(2, '0')}${String(now20.getMinutes()).padStart(2, '0')}${String(now20.getSeconds()).padStart(2, '0')}`
-    const devicePath = `\u555C${dateStr}.jpg`
+    const ext = uploadMode === 'image' ? '.jpg' : '.avi'
+    const devicePath = `\u555C${dateStr}${ext}`
     const pathUtf16 = new Uint8Array(devicePath.length * 2 + 2)
     for (let ci = 0; ci < devicePath.length; ci++) {
       const code = devicePath.charCodeAt(ci)
@@ -483,23 +513,128 @@
     return new Uint8Array(await blob.arrayBuffer())
   }
 
+  /** Convert a single image file to a 368x368 JPEG at a specific quality (no size targeting). */
+  async function imageFileTo368JpegFrame(file: File, quality = 0.88): Promise<Uint8Array> {
+    const bitmap = await createImageBitmap(file)
+    const srcRatio = bitmap.width / bitmap.height
+    const targetRatio = E87_IMAGE_WIDTH / E87_IMAGE_HEIGHT
+    let sx = 0, sy = 0, sw = bitmap.width, sh = bitmap.height
+    if (srcRatio > targetRatio) {
+      sw = Math.round(bitmap.height * targetRatio)
+      sx = Math.floor((bitmap.width - sw) / 2)
+    } else {
+      sh = Math.round(bitmap.width / targetRatio)
+      sy = Math.floor((bitmap.height - sh) / 2)
+    }
+    const canvas = new OffscreenCanvas(E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
+    const ctx = canvas.getContext('2d')!
+    ctx.fillStyle = 'black'
+    ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
+    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
+    bitmap.close()
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
+    return new Uint8Array(await blob.arrayBuffer())
+  }
+
+  /** Convert multiple image files to an MJPG AVI (image sequence, 1fps). */
+  async function imagesToAvi(files: File[]): Promise<Uint8Array> {
+    log(`Converting ${files.length} images to AVI sequence...`)
+    const frames: Uint8Array[] = []
+    for (let i = 0; i < files.length; i++) {
+      log(`  Processing image ${i + 1}/${files.length}: ${files[i].name}`)
+      frames.push(await imageFileTo368JpegFrame(files[i], 0.88))
+    }
+    const avi = buildMjpgAvi(frames, { fps: 1 })
+    log(`AVI built: ${frames.length} frames, ${avi.length} bytes`)
+    return avi
+  }
+
+  /** Extract frames from a video file at the given fps, resize to 368x368, build AVI. */
+  async function videoToAvi(file: File, fps: number): Promise<Uint8Array> {
+    log(`Extracting frames from video at ${fps} fps...`)
+    const url = URL.createObjectURL(file)
+    const video = document.createElement('video')
+    video.muted = true
+    video.playsInline = true
+    video.preload = 'auto'
+
+    await new Promise<void>((resolve, reject) => {
+      video.onloadedmetadata = () => resolve()
+      video.onerror = () => reject(new Error('Failed to load video'))
+      video.src = url
+    })
+
+    // Seek to start
+    video.currentTime = 0
+    await new Promise<void>((r) => { video.onseeked = () => r() })
+
+    const duration = video.duration
+    const frameInterval = 1 / fps
+    const canvas = new OffscreenCanvas(E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
+    const ctx = canvas.getContext('2d')!
+    const frames: Uint8Array[] = []
+
+    // Calculate source crop for center-crop to 1:1
+    const srcRatio = video.videoWidth / video.videoHeight
+    let sx = 0, sy = 0, sw = video.videoWidth, sh = video.videoHeight
+    if (srcRatio > 1) {
+      sw = video.videoHeight
+      sx = Math.floor((video.videoWidth - sw) / 2)
+    } else if (srcRatio < 1) {
+      sh = video.videoWidth
+      sy = Math.floor((video.videoHeight - sh) / 2)
+    }
+
+    log(`Video: ${video.videoWidth}x${video.videoHeight}, ${duration.toFixed(2)}s, extracting ~${Math.ceil(duration * fps)} frames`)
+
+    for (let t = 0; t < duration; t += frameInterval) {
+      video.currentTime = t
+      await new Promise<void>((r) => { video.onseeked = () => r() })
+
+      ctx.fillStyle = 'black'
+      ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
+
+      const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.88 })
+      frames.push(new Uint8Array(await blob.arrayBuffer()))
+
+      if (frames.length % 10 === 0) log(`  Extracted ${frames.length} frames...`)
+    }
+
+    URL.revokeObjectURL(url)
+    const avi = buildMjpgAvi(frames, { fps })
+    log(`AVI built: ${frames.length} frames @ ${fps}fps, ${avi.length} bytes`)
+    return avi
+  }
+
   function randomTempName(): string {
     const n = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')
     return `${n}.tmp`
   }
 
-  async function getJpegBytes(): Promise<Uint8Array> {
-    if (useDefaultImage) {
-      log('Loading default captured image (15647 bytes ground-truth)...')
-      const resp = await fetch('/captured_image.jpg')
-      if (!resp.ok) throw new Error('Failed to load default captured_image.jpg')
-      return new Uint8Array(await resp.arrayBuffer())
+  async function getUploadBytes(): Promise<Uint8Array> {
+    if (uploadMode === 'image') {
+      if (useDefaultImage) {
+        log('Loading default captured image (15647 bytes ground-truth)...')
+        const resp = await fetch('/captured_image.jpg')
+        if (!resp.ok) throw new Error('Failed to load default captured_image.jpg')
+        return new Uint8Array(await resp.arrayBuffer())
+      }
+      if (!selectedFile) throw new Error('No file selected.')
+      if (selectedFile.type.startsWith('image/')) {
+        return imageFileTo368JpegBytes(selectedFile)
+      }
+      return new Uint8Array(await selectedFile.arrayBuffer())
     }
-    if (!selectedFile) throw new Error('No file selected.')
-    if (selectedFile.type.startsWith('image/')) {
-      return imageFileTo368JpegBytes(selectedFile)
+    if (uploadMode === 'images') {
+      if (selectedFiles.length === 0) throw new Error('No images selected for sequence.')
+      return imagesToAvi(selectedFiles)
     }
-    return new Uint8Array(await selectedFile.arrayBuffer())
+    if (uploadMode === 'video') {
+      if (!selectedFile) throw new Error('No video file selected.')
+      return videoToAvi(selectedFile, videoFps)
+    }
+    throw new Error(`Unknown upload mode: ${uploadMode}`)
   }
 
   // ════════════════════════════════════════════════════════
@@ -517,9 +652,11 @@
     if (!notifyCharacteristics.length) throw new Error('No notification characteristic available.')
     if (!controlCharacteristic) throw new Error('E87 upload requires FD02 control characteristic.')
 
-    const jpegBytes = await getJpegBytes()
+    const jpegBytes = await getUploadBytes()
     const isJpeg = jpegBytes[0] === 0xff && jpegBytes[1] === 0xd8
-    log(`Prepared payload: ${jpegBytes.length} bytes (${isJpeg ? 'valid JPEG' : 'raw data'}).`)
+    const isAvi = jpegBytes[0] === 0x52 && jpegBytes[1] === 0x49 && jpegBytes[2] === 0x46 && jpegBytes[3] === 0x46
+    const fmtLabel = isJpeg ? 'JPEG' : isAvi ? 'AVI' : 'raw data'
+    log(`Prepared payload: ${jpegBytes.length} bytes (${fmtLabel}).`)
 
     // Update preview to show what we're actually sending
     if (previewUrl && !previewUrl.startsWith('/')) URL.revokeObjectURL(previewUrl)
@@ -640,13 +777,14 @@
     await waitForNotificationFrame((f) => f.cmd === 0x27, 8000, 'ack cmd 0x27')
 
     // ── PHASE 8: cmd 0x1b (file metadata: size, CRC, name) ──
-    // Body format: [seq] [0x00] [0x00] [size_hi] [size_lo]
+    // Body format: [seq] [size_b3] [size_b2] [size_b1] [size_b0]
     //              [fileCRC_hi] [fileCRC_lo] [rand] [rand]
     //              [name...] [0x00]
+    // body[1:5] = 32-bit big-endian file size (verified from extended capture)
     // The device computes CRC-16 XMODEM over the reassembled file
     // and compares it to body[5:7]. Mismatch → status 0x03.
     log('Phase 8: cmd 0x1b (file metadata)...')
-    const size16 = jpegBytes.length & 0xffff
+    const fileSize = jpegBytes.length
     const tempName = randomTempName()
     const nameBytes = new TextEncoder().encode(tempName)
 
@@ -657,10 +795,10 @@
     const metaBody = new Uint8Array(3 + 2 + 4 + nameBytes.length + 1)
     metaBody[0] = seqCounter
     seqCounter += 1
-    metaBody[1] = 0x00
-    metaBody[2] = 0x00
-    metaBody[3] = (size16 >> 8) & 0xff
-    metaBody[4] = size16 & 0xff
+    metaBody[1] = (fileSize >> 24) & 0xff
+    metaBody[2] = (fileSize >> 16) & 0xff
+    metaBody[3] = (fileSize >> 8) & 0xff
+    metaBody[4] = fileSize & 0xff
     metaBody[5] = (fileCrc >> 8) & 0xff   // CRC-16 XMODEM high byte
     metaBody[6] = fileCrc & 0xff          // CRC-16 XMODEM low byte
     metaBody[7] = Math.random() * 256 | 0 // random padding
@@ -966,8 +1104,16 @@
       status = 'Not connected.'
       return
     }
-    if (!useDefaultImage && !selectedFile) {
+    if (uploadMode === 'image' && !useDefaultImage && !selectedFile) {
       status = 'Select an image or use the default.'
+      return
+    }
+    if (uploadMode === 'images' && selectedFiles.length === 0) {
+      status = 'Select images for the sequence.'
+      return
+    }
+    if (uploadMode === 'video' && !selectedFile) {
+      status = 'Select a video file.'
       return
     }
     isWriting = true
@@ -1011,21 +1157,78 @@
   </section>
 
   <section class="panel">
-    <div class="image-source">
-      <div class="row buttons" style="margin-bottom:0.5rem">
-        <button class:active={useDefaultImage} on:click={selectDefaultImage} disabled={isWriting}>
-          Default (captured)
-        </button>
-        <label class="file-btn" class:active={!useDefaultImage}>
-          Custom image…
-          <input type="file" accept="image/*" on:change={setFile} disabled={isWriting} style="display:none" />
-        </label>
-      </div>
+    <!-- Upload mode tabs -->
+    <div class="row buttons mode-tabs" style="margin-bottom:0.6rem">
+      <button class:active={uploadMode === 'image'} on:click={() => uploadMode = 'image'} disabled={isWriting}>
+        🖼 Image
+      </button>
+      <button class:active={uploadMode === 'images'} on:click={() => uploadMode = 'images'} disabled={isWriting}>
+        🎞 Sequence
+      </button>
+      <button class:active={uploadMode === 'video'} on:click={() => uploadMode = 'video'} disabled={isWriting}>
+        🎬 Video
+      </button>
     </div>
 
-    {#if previewUrl}
-      <div class="preview">
-        <img src={previewUrl} alt="Image to send" />
+    <!-- Single image mode -->
+    {#if uploadMode === 'image'}
+      <div class="image-source">
+        <div class="row buttons" style="margin-bottom:0.5rem">
+          <button class:active={useDefaultImage} on:click={selectDefaultImage} disabled={isWriting}>
+            Default (captured)
+          </button>
+          <label class="file-btn" class:active={!useDefaultImage}>
+            Custom image…
+            <input type="file" accept="image/*" on:change={setFile} disabled={isWriting} style="display:none" />
+          </label>
+        </div>
+      </div>
+      {#if previewUrl}
+        <div class="preview">
+          <img src={previewUrl} alt="Image to send" />
+        </div>
+      {/if}
+
+    <!-- Image sequence mode -->
+    {:else if uploadMode === 'images'}
+      <div class="image-source">
+        <label class="file-btn" class:active={selectedFiles.length > 0}>
+          Select images…
+          <input type="file" accept="image/*" multiple on:change={setMultipleFiles} disabled={isWriting} style="display:none" />
+        </label>
+        {#if selectedFiles.length > 0}
+          <span class="dim" style="margin-left:0.5rem">{selectedFiles.length} images selected</span>
+        {/if}
+      </div>
+      {#if previewUrl && selectedFiles.length > 0}
+        <div class="preview">
+          <img src={previewUrl} alt="First image in sequence" />
+          <p class="dim" style="font-size:0.8rem;margin:0.3rem 0 0">Preview: first of {selectedFiles.length}</p>
+        </div>
+      {/if}
+
+    <!-- Video mode -->
+    {:else if uploadMode === 'video'}
+      <div class="image-source">
+        <label class="file-btn" class:active={selectedFile !== null && !useDefaultImage}>
+          Select video…
+          <input type="file" accept="video/*" on:change={setVideoFile} disabled={isWriting} style="display:none" />
+        </label>
+        {#if selectedFile && !useDefaultImage}
+          <span class="dim" style="margin-left:0.5rem">{selectedFile.name}</span>
+        {/if}
+      </div>
+      {#if previewUrl && selectedFile && !useDefaultImage}
+        <div class="preview">
+          <!-- svelte-ignore a11y_media_has_caption -->
+          <video src={previewUrl} style="max-width:180px;max-height:180px;border:1px solid #334;border-radius:6px" controls muted></video>
+        </div>
+      {/if}
+      <div class="settings">
+        <label>
+          <span>Frame rate (fps)</span>
+          <input type="number" min="1" max="30" step="1" bind:value={videoFps} disabled={isWriting} />
+        </label>
       </div>
     {/if}
 
@@ -1038,7 +1241,7 @@
 
     <div class="row buttons">
       <button on:click={startUpload} disabled={!server?.connected || isWriting}>
-        {isWriting ? 'Uploading…' : 'Upload Image'}
+        {isWriting ? 'Uploading…' : 'Upload'}
       </button>
     </div>
 
@@ -1080,6 +1283,7 @@
   }
   .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
   .buttons { margin-bottom: 0.6rem; }
+  .mode-tabs { border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.6rem; }
   .status { font-weight: 600; color: #d4e6ff; margin-bottom: 0.15rem; }
   .dim { font-weight: 400; color: #7a9dc5; }
   .settings {
