@@ -21,6 +21,11 @@ export interface TransformSettings {
   backdropColor?: string
 }
 
+export interface OutputFrameSize {
+  width: number
+  height: number
+}
+
 const DEFAULT_TRANSFORM: TransformSettings = {
   scale: 1,
   panX: 0,
@@ -66,12 +71,15 @@ async function squareBitmapToJpeg(
   bitmap: ImageBitmap,
   transform: TransformSettings,
   quality = 0.88,
+  outputSize: OutputFrameSize = { width: E87_IMAGE_WIDTH, height: E87_IMAGE_HEIGHT },
 ): Promise<Uint8Array> {
-  const canvas = new OffscreenCanvas(E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
+  const width = Math.max(1, Math.round(outputSize.width))
+  const height = Math.max(1, Math.round(outputSize.height))
+  const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not create 2D canvas context.')
 
-  renderTransformedFrame(ctx, bitmap, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT, transform)
+  renderTransformedFrame(ctx, bitmap, width, height, transform)
   const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
   return new Uint8Array(await blob.arrayBuffer())
 }
@@ -151,8 +159,9 @@ export async function imagesToPreviewBitmaps(files: File[], size = LIVE_PREVIEW_
 export async function previewBitmapToJpeg(
   bitmap: ImageBitmap,
   transform: TransformSettings = DEFAULT_TRANSFORM,
+  outputSize: OutputFrameSize = { width: E87_IMAGE_WIDTH, height: E87_IMAGE_HEIGHT },
 ): Promise<Uint8Array> {
-  return squareBitmapToJpeg(bitmap, transform, 0.88)
+  return squareBitmapToJpeg(bitmap, transform, 0.88, outputSize)
 }
 
 export async function previewBitmapsToAvi(
@@ -160,12 +169,13 @@ export async function previewBitmapsToAvi(
   fps: number,
   transform: TransformSettings = DEFAULT_TRANSFORM,
   log?: (msg: string) => void,
+  outputSize: OutputFrameSize = { width: E87_IMAGE_WIDTH, height: E87_IMAGE_HEIGHT },
 ): Promise<Uint8Array> {
   if (bitmaps.length === 0) throw new Error('No frames to encode.')
   log?.(`Encoding ${bitmaps.length} cached frames to AVI...`)
   const frames: Uint8Array[] = []
   for (let i = 0; i < bitmaps.length; i++) {
-    frames.push(await squareBitmapToJpeg(bitmaps[i], transform, 0.88))
+    frames.push(await squareBitmapToJpeg(bitmaps[i], transform, 0.88, outputSize))
     if ((i + 1) % 25 === 0) log?.(`  Encoded ${i + 1}/${bitmaps.length} frames...`)
   }
   const avi = buildMjpgAvi(frames, { fps })

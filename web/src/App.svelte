@@ -2,15 +2,36 @@
   import { formatDuration, formatBytes } from './lib/utils'
   import {
     MAX_UPLOAD_BYTES,
+    E87_IMAGE_WIDTH,
+    E87_IMAGE_HEIGHT,
     previewBitmapToJpeg,
     previewBitmapsToAvi,
     imageFileToPreviewBitmap,
     imagesToPreviewBitmaps,
     videoToPreviewBitmaps,
     type TransformSettings,
+    type OutputFrameSize,
   } from './lib/image-processing'
   import { parseAviFrames, readAviFps } from './lib/avi-preview'
-  import { connectE87, disconnectE87, writeFileE87, type E87Connection, type UploadMode } from './lib/e87-protocol'
+  import {
+    connectE87,
+    disconnectE87,
+    writeFileE87,
+    refreshBatteryE87,
+    listSmallFilesE87,
+    readSmallFileE87,
+    deleteSmallFileE87,
+    getTargetInfoE87,
+    getTargetFeatureMapE87,
+    getSysInfoE87,
+    browseFilesE87,
+    stopBrowseE87,
+    getScreenInfoE87,
+    type E87Connection,
+    type UploadMode,
+    type E87SmallFileEntry,
+    type E87FileBrowseEntry,
+  } from './lib/e87-protocol'
   import { buildMjpgAvi } from './avi-builder'
   import type { PatternDef } from './pattern-generators'
   import QRCode from 'qrcode'
@@ -28,6 +49,13 @@
   type PreviewMode = 'live' | 'preview'
   type QrCellStyle = 'square' | 'round' | 'squircle'
   type QrOutsideMode = 'on' | 'off'
+  type ScreenInfo = {
+    width: number
+    height: number
+    pictureWidth: number
+    pictureHeight: number
+    memory: number
+  }
 
   type SavedSettings = {
     uploadMode?: UploadMode
@@ -94,6 +122,18 @@
   let status = $state('Disconnected')
   let batteryLevel: number | null = $state(null)
   let batteryUpdatedAt = $state('')
+  let screenWidth = $state<number | null>(null)
+  let screenHeight = $state<number | null>(null)
+  let pictureWidth = $state(E87_IMAGE_WIDTH)
+  let pictureHeight = $state(E87_IMAGE_HEIGHT)
+
+  let isDeviceOpsBusy = $state(false)
+  let smallFiles: E87SmallFileEntry[] = $state([])
+  let browseEntries: E87FileBrowseEntry[] = $state([])
+  let selectedSmallFileKey = $state('')
+  let smallFileReadText = $state('')
+  let rcspInfoText = $state('')
+
   let logs: string[] = $state([])
 
   let uploadMode: UploadMode = $state((saved.uploadMode ?? 'pattern') as UploadMode)
@@ -169,6 +209,62 @@
     logs = [`[${ts}] ${message}`, ...logs].slice(0, 250)
   }
 
+  function applyScreenInfo(info: ScreenInfo | null): void {
+    if (!info) return
+    screenWidth = info.width
+    screenHeight = info.height
+    const hasScreenSize = Number.isFinite(info.width) && info.width > 0 && Number.isFinite(info.height) && info.height > 0
+    const hasPictureSize = Number.isFinite(info.pictureWidth) && info.pictureWidth > 0 && Number.isFinite(info.pictureHeight) && info.pictureHeight > 0
+
+    if (hasScreenSize) {
+      pictureWidth = Math.max(1, Math.round(info.width))
+      pictureHeight = Math.max(1, Math.round(info.height))
+      log(`Output frame size set to ${pictureWidth}x${pictureHeight} (from screen size; picture=${info.pictureWidth}x${info.pictureHeight}).`)
+      return
+    }
+
+    if (hasPictureSize) {
+      pictureWidth = Math.max(1, Math.round(info.pictureWidth))
+      pictureHeight = Math.max(1, Math.round(info.pictureHeight))
+      log(`Output frame size set to ${pictureWidth}x${pictureHeight} (from picture size).`)
+    }
+  }
+
+  function getOutputFrameSize(): OutputFrameSize {
+    return {
+      width: pictureWidth,
+      height: pictureHeight,
+    }
+  }
+
+  async function resizeJpegToOutput(jpegBytes: Uint8Array, output: OutputFrameSize): Promise<Uint8Array> {
+    if (output.width === 368 && output.height === 368) return jpegBytes
+    const blob = new Blob([new Uint8Array(jpegBytes)], { type: 'image/jpeg' })
+    const bitmap = await createImageBitmap(blob)
+    try {
+      const canvas = new OffscreenCanvas(output.width, output.height)
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('Could not create 2D canvas context.')
+      ctx.fillStyle = 'black'
+      ctx.fillRect(0, 0, output.width, output.height)
+      ctx.drawImage(bitmap, 0, 0, output.width, output.height)
+      const resized = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 })
+      return new Uint8Array(await resized.arrayBuffer())
+    } finally {
+      bitmap.close()
+    }
+  }
+
+  async function normalizePatternFramesForOutput(frames: Uint8Array[]): Promise<Uint8Array[]> {
+    const output = getOutputFrameSize()
+    if (output.width === 368 && output.height === 368) return frames
+    const resized: Uint8Array[] = []
+    for (let i = 0; i < frames.length; i++) {
+      resized.push(await resizeJpegToOutput(frames[i], output))
+    }
+    return resized
+  }
+
   // ─── Connection ───
 
   async function connect(): Promise<void> {
@@ -180,10 +276,22 @@
     isConnecting = true
     try {
       status = 'Requesting device...'
-      conn = await connectE87(log)
-      batteryLevel = conn.batteryLevel
-      batteryUpdatedAt = conn.batteryUpdatedAt
-      status = `Connected: ${conn.device.name ?? 'Unknown device'}`
+      const nextConn = await connectE87(log)
+      batteryLevel = nextConn.batteryLevel
+      batteryUpdatedAt = nextConn.batteryUpdatedAt
+      // Auto-read battery via Qix 9E protocol
+      try {
+        const result = await refreshBatteryE87(nextConn, log)
+        batteryLevel = result.level
+        batteryUpdatedAt = result.updatedAt
+      } catch { /* best effort */ }
+      // Auto-read screen info
+      try {
+        const info = await getScreenInfoE87(nextConn, log)
+        applyScreenInfo(info)
+      } catch { /* best effort */ }
+      conn = nextConn
+      status = `Connected: ${nextConn.device.name ?? 'Unknown device'}`
     } catch (error) {
       status = `Connection failed: ${(error as Error).message}`
       log(status)
@@ -203,10 +311,263 @@
     }
     batteryLevel = null
     batteryUpdatedAt = ''
+    screenWidth = null
+    screenHeight = null
+    pictureWidth = E87_IMAGE_WIDTH
+    pictureHeight = E87_IMAGE_HEIGHT
     status = 'Disconnected'
     progress = 0
     progressLabel = ''
+    smallFiles = []
+    browseEntries = []
+    selectedSmallFileKey = ''
+    smallFileReadText = ''
     log('Disconnected.')
+  }
+
+  // ─── Device utility actions ───
+
+  function smallFileKey(file: E87SmallFileEntry): string {
+    return `${file.type}:${file.id}`
+  }
+
+  function getSelectedSmallFile(): E87SmallFileEntry | null {
+    if (!selectedSmallFileKey) return null
+    return smallFiles.find((f) => smallFileKey(f) === selectedSmallFileKey) ?? null
+  }
+
+  async function refreshBattery(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const result = await refreshBatteryE87(conn, log)
+      batteryLevel = result.level
+      batteryUpdatedAt = result.updatedAt
+      if (result.level === null) {
+        status = 'Battery service unavailable on this device.'
+      }
+    } catch (error) {
+      status = `Battery read failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function listSmallFiles(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    smallFileReadText = ''
+    try {
+      const items = await listSmallFilesE87(conn, log)
+      smallFiles = items
+      if (items.length === 0) {
+        status = 'No small files reported by device.'
+        selectedSmallFileKey = ''
+      } else {
+        status = `Found ${items.length} small file(s).`
+        if (!getSelectedSmallFile()) {
+          selectedSmallFileKey = smallFileKey(items[0])
+        }
+      }
+    } catch (error) {
+      status = `List files failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function browseFiles(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      // Try files first, then folders if empty
+      let results = await browseFilesE87(conn, log, { type: 1, readNum: 50 })
+      if (results.length === 0) {
+        results = await browseFilesE87(conn, log, { type: 0, readNum: 50 })
+      }
+      browseEntries = results
+      const total = results.length
+      rcspInfoText = JSON.stringify({
+        command: 'FileBrowseCmd',
+        totalEntries: total,
+        entries: results,
+      }, null, 2)
+      status = total > 0 ? `FileBrowse: found ${total} entries.` : 'FileBrowse: no entries found on any storage.'
+    } catch (error) {
+      status = `FileBrowse failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function queryScreenInfo(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const info = await getScreenInfoE87(conn, log)
+      applyScreenInfo(info)
+      rcspInfoText = JSON.stringify({
+        command: 'GetScreenInfoCmd',
+        info,
+      }, null, 2)
+      status = info ? `Screen: ${info.width}x${info.height} (pic ${info.pictureWidth}x${info.pictureHeight})` : 'ScreenInfo: no response.'
+    } catch (error) {
+      status = `ScreenInfo failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function readSelectedSmallFile(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    const item = getSelectedSmallFile()
+    if (!item) {
+      status = 'No file selected.'
+      return
+    }
+
+    isDeviceOpsBusy = true
+    try {
+      const { data, crc16 } = await readSmallFileE87(conn, item, log)
+      const asText = new TextDecoder().decode(data)
+      const crcInfo = crc16 === null ? 'n/a' : `0x${crc16.toString(16).padStart(4, '0')}`
+      smallFileReadText = `type=${item.typeName} id=${item.id} size=${data.length} crc=${crcInfo}\n\n${asText}`
+      status = `Read ${data.length} byte(s) from ${item.typeName}#${item.id}.`
+    } catch (error) {
+      status = `Read file failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function deleteSelectedSmallFile(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    const item = getSelectedSmallFile()
+    if (!item) {
+      status = 'No file selected.'
+      return
+    }
+
+    isDeviceOpsBusy = true
+    try {
+      await deleteSmallFileE87(conn, item, log)
+      const removedKey = smallFileKey(item)
+      smallFiles = smallFiles.filter((f) => smallFileKey(f) !== removedKey)
+      selectedSmallFileKey = smallFiles.length ? smallFileKey(smallFiles[0]) : ''
+      smallFileReadText = ''
+      status = `Deleted ${item.typeName}#${item.id}.`
+    } catch (error) {
+      status = `Delete file failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function getTargetFeatureMap(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const res = await getTargetFeatureMapE87(conn, log)
+      rcspInfoText = JSON.stringify({
+        command: 'GetTargetFeatureMapCmd',
+        maskHex: `0x${res.mask.toString(16).padStart(8, '0')}`,
+        supported: res.mask !== 0,
+        raw: res.raw,
+      }, null, 2)
+      status = res.mask !== 0
+        ? `FeatureMap: 0x${res.mask.toString(16).padStart(8, '0')}`
+        : 'FeatureMap: not supported by this device.'
+    } catch (error) {
+      status = `GetTargetFeatureMapCmd failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function getTargetInfo(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const res = await getTargetInfoE87(conn, log)
+      rcspInfoText = JSON.stringify({
+        command: 'GetTargetInfoCmd',
+        requestMaskHex: `0x${res.requestMask.toString(16)}`,
+        requestPlatform: res.requestPlatform,
+        attrs: res.attrs,
+        payloadHex: res.payload,
+        rawBodyHex: res.raw,
+      }, null, 2)
+      status = 'GetTargetInfoCmd completed.'
+    } catch (error) {
+      status = `GetTargetInfoCmd failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function getSysInfo(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const res = await getSysInfoE87(conn, log)
+      const batteryAttr = res.attrs.find((a) => a.type === 0)
+      const batteryGuess = batteryAttr?.decoded ?? batteryAttr?.dataHex ?? null
+      rcspInfoText = JSON.stringify({
+        command: 'GetSysInfoCmd',
+        functionHex: `0x${res.function.toString(16)}`,
+        batteryGuess,
+        attrs: res.attrs,
+        rawPayloadHex: res.raw,
+      }, null, 2)
+      if (batteryAttr?.decoded?.endsWith('%')) {
+        const n = Number.parseInt(batteryAttr.decoded, 10)
+        if (Number.isFinite(n)) {
+          batteryLevel = n
+          batteryUpdatedAt = new Date().toLocaleTimeString()
+        }
+      }
+      status = 'GetSysInfoCmd completed.'
+    } catch (error) {
+      status = `GetSysInfoCmd failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
   }
 
   // ─── File handling ───
@@ -596,7 +957,7 @@
       const allFrames = await selectedPattern.generate({ frames: sampleFrames, fps: patternFps })
       // Pick a frame ~40% through — usually more visually interesting than exact center
       const pickIdx = Math.floor(sampleFrames * 0.4)
-      const stillJpeg = allFrames[pickIdx]
+      const stillJpeg = await resizeJpegToOutput(allFrames[pickIdx], getOutputFrameSize())
 
       preparedPayload = stillJpeg
       preparedIsStillImage = true
@@ -675,16 +1036,16 @@
 
     const qr = QRCode.create(targetUrl, { errorCorrectionLevel: 'M' })
     const moduleCount = qr.modules.size
-    const canvasSize = 368
-    const canvas = new OffscreenCanvas(canvasSize, canvasSize)
+    const output = getOutputFrameSize()
+    const canvas = new OffscreenCanvas(output.width, output.height)
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('Could not create QR canvas context.')
 
     const qrCanvasBg = '#d8dbe4'
     ctx.fillStyle = qrCanvasBg
-    ctx.fillRect(0, 0, canvasSize, canvasSize)
+    ctx.fillRect(0, 0, output.width, output.height)
 
-    const motif = 332
+    const motif = Math.max(1, Math.floor(Math.min(output.width, output.height) * (332 / 368)))
     const quietModules = 2
     const outerBandModules = 10
     const totalGridModules = moduleCount + (quietModules + outerBandModules) * 2
@@ -705,7 +1066,7 @@
     const rng = createRng(seed)
 
     ctx.save()
-    ctx.translate(canvasSize / 2, canvasSize / 2)
+    ctx.translate(output.width / 2, output.height / 2)
     ctx.rotate((qrRotation * Math.PI) / 180)
     ctx.scale(qrZoom, qrZoom)
 
@@ -787,7 +1148,7 @@
 
       if (uploadMode === 'image') {
         if (imageLiveFrames.length === 0) throw new Error('No image selected')
-        const imageJpeg = await previewBitmapToJpeg(imageLiveFrames[0], getTransform('image'))
+        const imageJpeg = await previewBitmapToJpeg(imageLiveFrames[0], getTransform('image'), getOutputFrameSize())
         preparedPayload = imageJpeg
         preparedIsStillImage = true
         preparedPayloadLabel = `Image preview — ${formatBytes(imageJpeg.length)}`
@@ -798,16 +1159,17 @@
 
       if (uploadMode === 'images') {
         if (sequenceLiveFrames.length === 0) throw new Error('No images selected')
-        avi = await previewBitmapsToAvi(sequenceLiveFrames, sequenceFps, getTransform('images'), log)
+        avi = await previewBitmapsToAvi(sequenceLiveFrames, sequenceFps, getTransform('images'), log, getOutputFrameSize())
         label = `${sequenceLiveFrames.length} cached images @ ${sequenceFps}fps`
       } else if (uploadMode === 'video') {
         if (videoLiveFrames.length === 0) throw new Error('No video selected')
-        avi = await previewBitmapsToAvi(videoLiveFrames, videoFps, getTransform('video'), log)
+        avi = await previewBitmapsToAvi(videoLiveFrames, videoFps, getTransform('video'), log, getOutputFrameSize())
         label = `Video ${videoTrimStart.toFixed(1)}s–${videoTrimEnd.toFixed(1)}s @ ${videoFps}fps`
       } else if (uploadMode === 'pattern') {
         if (!selectedPattern) throw new Error('No pattern selected')
         isGeneratingPattern = true
-        const patternFrames = await selectedPattern.generate({ frames: patternFrameCount, fps: patternFps })
+        const patternFramesRaw = await selectedPattern.generate({ frames: patternFrameCount, fps: patternFps })
+        const patternFrames = await normalizePatternFramesForOutput(patternFramesRaw)
         avi = buildMjpgAvi(patternFrames, { fps: patternFps })
         label = `${selectedPattern.name} — ${patternFrameCount} frames @ ${patternFps}fps`
         isGeneratingPattern = false
@@ -846,21 +1208,22 @@
     if (uploadMode === 'image') {
       if (imageLiveFrames.length === 0 && selectedFile) await prepareImageLiveFrames()
       if (imageLiveFrames.length === 0) throw new Error('No image selected.')
-      return previewBitmapToJpeg(imageLiveFrames[0], getTransform('image'))
+      return previewBitmapToJpeg(imageLiveFrames[0], getTransform('image'), getOutputFrameSize())
     }
     if (uploadMode === 'images') {
       if (sequenceLiveFrames.length === 0 && selectedFiles.length > 0) await prepareSequenceLiveFrames()
       if (sequenceLiveFrames.length === 0) throw new Error('No sequence selected.')
-      return previewBitmapsToAvi(sequenceLiveFrames, sequenceFps, getTransform('images'), log)
+      return previewBitmapsToAvi(sequenceLiveFrames, sequenceFps, getTransform('images'), log, getOutputFrameSize())
     }
     if (uploadMode === 'video') {
       if (videoLiveFrames.length === 0 && selectedFile) await prepareVideoLiveFrames()
       if (videoLiveFrames.length === 0) throw new Error('No video frames cached.')
-      return previewBitmapsToAvi(videoLiveFrames, videoFps, getTransform('video'), log)
+      return previewBitmapsToAvi(videoLiveFrames, videoFps, getTransform('video'), log, getOutputFrameSize())
     }
     if (uploadMode === 'pattern') {
       if (!selectedPattern) throw new Error('No pattern selected.')
-      const patternFrames = await selectedPattern.generate({ frames: patternFrameCount, fps: patternFps })
+      const patternFramesRaw = await selectedPattern.generate({ frames: patternFrameCount, fps: patternFps })
+      const patternFrames = await normalizePatternFramesForOutput(patternFramesRaw)
       return buildMjpgAvi(patternFrames, { fps: patternFps })
     }
     if (uploadMode === 'qr') {
@@ -995,6 +1358,24 @@
     <div class="status">Status: {status}</div>
     {#if batteryLevel !== null}
       <div class="status">Battery: {batteryLevel}% <span class="dim">({batteryUpdatedAt})</span></div>
+    {/if}
+
+    <div class="settings" style="margin-top:0.5rem">
+      <label style="min-width: 280px; flex:1">
+        <span>Small files</span>
+        <select bind:value={selectedSmallFileKey} disabled={isDeviceOpsBusy || smallFiles.length === 0}>
+          <option value="">-- none --</option>
+          {#each smallFiles as f}
+            <option value={smallFileKey(f)}>{f.typeName} — id {f.id} — {formatBytes(f.size)}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+    {#if smallFileReadText}
+      <textarea readonly rows="8" value={smallFileReadText}></textarea>
+    {/if}
+    {#if rcspInfoText}
+      <textarea readonly rows="10" value={rcspInfoText}></textarea>
     {/if}
   </section>
 
