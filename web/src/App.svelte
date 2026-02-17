@@ -548,7 +548,12 @@
     color: #e6f1ff;
     min-height: 100vh;
   }
-  .app { max-width: 720px; margin: 0 auto; padding: 1.5rem; }
+  .app {
+    width: min(1024px, 92vw);
+    min-width: min(1024px, 90vw);
+    margin: 0 auto;
+    padding: 1.5rem;
+  }
   h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
   .hint { margin: 0 0 0.8rem; color: #8badd4; font-size: 0.88rem; }
   .panel {
@@ -567,7 +572,7 @@
   .settings { display: flex; gap: 0.8rem; margin: 0.6rem 0; flex-wrap: wrap; align-items: flex-end; }
   .settings label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.88rem; }
   .settings label span { color: #b0cce8; }
-  input, button {
+  input, button, select, textarea {
     border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.16);
     background: rgba(255, 255, 255, 0.07);
@@ -575,11 +580,18 @@
     padding: 0.5rem 0.7rem;
     font-size: 0.9rem;
   }
+  select, textarea { width: 100%; }
+  textarea {
+    margin-top: 0.5rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    line-height: 1.3;
+  }
   input[type="number"] { width: 90px; }
   button { cursor: pointer; font-weight: 600; }
   button:hover:not(:disabled) { border-color: rgba(129, 178, 255, 0.9); }
   button:disabled { opacity: 0.45; cursor: not-allowed; }
   button.secondary { background: rgba(255, 100, 100, 0.12); }
+  button.danger { background: rgba(255, 70, 70, 0.18); border-color: rgba(255, 130, 130, 0.45); }
   button.active {
     border-color: rgba(129, 178, 255, 0.9);
     background: rgba(129, 178, 255, 0.14);

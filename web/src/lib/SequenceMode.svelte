@@ -16,6 +16,29 @@
     isWriting, isGeneratingPreview, selectedFiles,
     sequenceFps = $bindable(), onSelectFiles, onGeneratePreview,
   }: Props = $props()
+
+  let lastAutoPreviewSignature = $state('')
+
+  const AUTO_PREVIEW_DEBOUNCE_MS = 250
+
+  $effect(() => {
+    if (selectedFiles.length === 0) return
+    if (isWriting || isGeneratingPreview) return
+
+    const filesSignature = selectedFiles
+      .map((f) => `${f.name}:${f.size}:${f.lastModified}`)
+      .join(',')
+    const signature = `${filesSignature}|fps:${sequenceFps}`
+
+    if (signature === lastAutoPreviewSignature) return
+
+    const timeout = setTimeout(() => {
+      lastAutoPreviewSignature = signature
+      onGeneratePreview()
+    }, AUTO_PREVIEW_DEBOUNCE_MS)
+
+    return () => clearTimeout(timeout)
+  })
 </script>
 
 <div class="image-source">

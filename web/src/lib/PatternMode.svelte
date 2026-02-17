@@ -28,6 +28,9 @@
   }: Props = $props()
 
   let outputMode: 'still' | 'video' = $state('video')
+  let lastAutoPreviewSignature = $state('')
+
+  const AUTO_PREVIEW_DEBOUNCE_MS = 250
 
   function estimatedSize(): number {
     return patternFrameCount * 8000 + 6000
@@ -40,6 +43,28 @@
       onGeneratePreview()
     }
   }
+
+  $effect(() => {
+    if (!selectedPattern) return
+    if (isWriting || isGeneratingPreview || isGeneratingPattern) return
+
+    const signature = outputMode === 'still'
+      ? `still:${selectedPattern.id}`
+      : `video:${selectedPattern.id}:${patternFrameCount}:${patternFps}`
+
+    if (signature === lastAutoPreviewSignature) return
+
+    const timeout = setTimeout(() => {
+      lastAutoPreviewSignature = signature
+      if (outputMode === 'still') {
+        onGenerateStill()
+      } else {
+        onGeneratePreview()
+      }
+    }, AUTO_PREVIEW_DEBOUNCE_MS)
+
+    return () => clearTimeout(timeout)
+  })
 </script>
 
 <div class="pattern-grid">

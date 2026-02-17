@@ -274,14 +274,20 @@ async function generateBrailleMatrix(opts: PatternOptions): Promise<Uint8Array[]
   const [canvas, ctx] = createCanvas()
   const brailleBase = 0x2800
   const fontSize = 16
-  const cols = Math.floor(SIZE / (fontSize * 0.6))
+  const cellW = fontSize * 0.72
+  const cols = Math.floor(SIZE / cellW)
   const rows = Math.floor(SIZE / fontSize)
   const frames: Uint8Array[] = []
 
-  const phaseGrid = Array.from({ length: rows }, (_, y) =>
-    Array.from({ length: cols }, (_, x) =>
-      Math.sqrt((x - cols / 2) ** 2 + (y - rows / 2) ** 2)
-    )
+  // Use real pixel distance so radial waves remain circular (not elliptical).
+  const phaseGrid = Array.from({ length: rows }, (_, r) =>
+    Array.from({ length: cols }, (_, c) => {
+      const px = (c + 0.5) * cellW
+      const py = (r + 0.5) * fontSize
+      const dx = px - HALF
+      const dy = py - HALF
+      return Math.sqrt(dx * dx + dy * dy)
+    }),
   )
 
   for (let f = 0; f < opts.frames; f++) {
@@ -291,12 +297,12 @@ async function generateBrailleMatrix(opts: PatternOptions): Promise<Uint8Array[]
 
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const wave = Math.sin(phaseGrid[r][c] * 0.3 - t * 3)
+        const wave = Math.sin(phaseGrid[r][c] * 0.06 - t * 3)
         const bits = Math.floor((wave * 0.5 + 0.5) * 255) & 0xff
         const char = String.fromCharCode(brailleBase + bits)
         const brightness = Math.floor((wave * 0.5 + 0.5) * 200) + 55
         ctx.fillStyle = `rgb(${brightness * 0.3},${brightness * 0.8},${brightness})`
-        ctx.fillText(char, c * fontSize * 0.6, r * fontSize + fontSize)
+        ctx.fillText(char, c * cellW, r * fontSize + fontSize)
       }
     }
 
@@ -313,8 +319,9 @@ async function generateBrailleMatrix(opts: PatternOptions): Promise<Uint8Array[]
 async function generateCircularProgress(opts: PatternOptions): Promise<Uint8Array[]> {
   const [canvas, ctx] = createCanvas()
   const frames: Uint8Array[] = []
-  const ringCount = 5
-  const ringWidth = 18
+  // Thick rings that intentionally occupy nearly the full disc.
+  const ringCount = 3
+  const ringWidth = 48
   const gap = 6
   const ringColors = ['#ff3366', '#ff9933', '#33ff99', '#3399ff', '#cc33ff']
 
@@ -322,14 +329,29 @@ async function generateCircularProgress(opts: PatternOptions): Promise<Uint8Arra
     const phase = f / opts.frames
     clear(ctx, '#0a0a14')
 
+    const bg = ctx.createRadialGradient(HALF, HALF, 20, HALF, HALF, RADIUS)
+    bg.addColorStop(0, 'rgba(255,255,255,0.04)')
+    bg.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = bg
+    ctx.beginPath()
+    ctx.arc(HALF, HALF, RADIUS, 0, TAU)
+    ctx.fill()
+
     for (let i = 0; i < ringCount; i++) {
-      const r = RADIUS - i * (ringWidth + gap) - gap
+      const r = RADIUS - i * (ringWidth + gap) - ringWidth / 2 - 1
       if (r < 20) break
       // Each ring completes a different number of full rotations per loop
       const cycles = 1 + i * 0.5
       const progress = (phase * cycles + i * 0.2) % 1
       const angle = progress * TAU
       const direction = i % 2 === 0 ? 1 : -1
+
+      // Base ring track so the pattern fills the disc better.
+      ctx.beginPath()
+      ctx.arc(HALF, HALF, r, 0, TAU)
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)'
+      ctx.lineWidth = ringWidth
+      ctx.stroke()
 
       ctx.beginPath()
       ctx.arc(HALF, HALF, r, -Math.PI / 2, -Math.PI / 2 + angle * direction, direction < 0)
@@ -342,24 +364,24 @@ async function generateCircularProgress(opts: PatternOptions): Promise<Uint8Arra
       const tx = HALF + Math.cos(tipAngle) * r
       const ty = HALF + Math.sin(tipAngle) * r
       ctx.beginPath()
-      ctx.arc(tx, ty, ringWidth / 2 + 2, 0, TAU)
+      ctx.arc(tx, ty, ringWidth * 0.42, 0, TAU)
       ctx.fillStyle = '#fff'
-      ctx.globalAlpha = 0.4
+      ctx.globalAlpha = 0.45
       ctx.fill()
       ctx.globalAlpha = 1
     }
 
     // Pulsing center circle instead of non-looping percentage
     const pulse = Math.sin(phase * TAU * 3) * 0.3 + 0.7
-    const grad = ctx.createRadialGradient(HALF, HALF, 0, HALF, HALF, 30 * pulse)
+    const grad = ctx.createRadialGradient(HALF, HALF, 0, HALF, HALF, 62 * pulse)
     grad.addColorStop(0, 'rgba(255,255,255,0.7)')
     grad.addColorStop(1, 'rgba(255,255,255,0)')
     ctx.fillStyle = grad
     ctx.beginPath()
-    ctx.arc(HALF, HALF, 30 * pulse, 0, TAU)
+    ctx.arc(HALF, HALF, 62 * pulse, 0, TAU)
     ctx.fill()
 
-    circularMask(ctx)
+    // circularMask(ctx)
     frames.push(await toJpeg(canvas))
   }
   return frames
@@ -450,42 +472,62 @@ async function generateRadarSweep(opts: PatternOptions): Promise<Uint8Array[]> {
 async function generateHypnoticSpirals(opts: PatternOptions): Promise<Uint8Array[]> {
   const [canvas, ctx] = createCanvas()
   const frames: Uint8Array[] = []
-  const arms = 6
+  // "500% more crazy": more arms, overlays, turbulence, and color motion.
+  const arms = 14
   const spiralColors = ['#ff0066', '#0066ff', '#ffcc00', '#00ff99', '#cc33ff', '#ff6600']
 
   for (let f = 0; f < opts.frames; f++) {
     const phase = f / opts.frames
-    const t = phase * TAU
+    const t = phase * TAU * 0.1
     clear(ctx, '#000')
 
+    const halo = ctx.createRadialGradient(HALF, HALF, 0, HALF, HALF, RADIUS)
+    halo.addColorStop(0, 'rgba(255,255,255,0.04)')
+    halo.addColorStop(0.45, 'rgba(140,80,255,0.08)')
+    halo.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = halo
+    ctx.beginPath()
+    ctx.arc(HALF, HALF, RADIUS, 0, TAU)
+    ctx.fill()
+
     for (let arm = 0; arm < arms; arm++) {
-      const baseAngle = (arm / arms) * TAU + t * 0.8
-      ctx.beginPath()
-      for (let r = 0; r < RADIUS; r += 1) {
-        const twist = r * 0.02 + Math.sin(r * 0.01 + t * 2) * 0.5
-        const angle = baseAngle + twist
-        const x = HALF + Math.cos(angle) * r
-        const y = HALF + Math.sin(angle) * r
-        if (r === 0) ctx.moveTo(x, y)
-        else ctx.lineTo(x, y)
+      const baseAngle = (arm / arms) * TAU + t * 1.65
+      const hueShift = (phase * 360 + arm * 24) % 360
+      for (let layer = 0; layer < 3; layer++) {
+        ctx.beginPath()
+        for (let r = 0; r < RADIUS; r += 1) {
+          const turbulence = Math.sin(r * 0.06 - t * 8 + arm * 0.9) * 0.16
+          const wobble = Math.sin(r * 0.018 + t * (2 + layer * 1.2) + arm * 0.7) * (0.7 + layer * 0.3)
+          const twist = r * (0.024 + layer * 0.006) + wobble + turbulence
+          const angle = baseAngle + twist
+          const x = HALF + Math.cos(angle) * r
+          const y = HALF + Math.sin(angle) * r
+          if (r === 0) ctx.moveTo(x, y)
+          else ctx.lineTo(x, y)
+        }
+
+        ctx.strokeStyle = layer === 0
+          ? `hsla(${hueShift},100%,64%,0.9)`
+          : layer === 1
+            ? spiralColors[arm % spiralColors.length]
+            : `hsla(${(hueShift + 160) % 360},100%,52%,0.78)`
+        ctx.lineWidth = layer === 0 ? 2.2 : layer === 1 ? 4.6 : 7.4
+        ctx.globalAlpha = layer === 2 ? 0.2 : layer === 1 ? 0.82 : 0.92
+        ctx.stroke()
       }
-      ctx.strokeStyle = spiralColors[arm % spiralColors.length]
-      ctx.lineWidth = 3
-      ctx.globalAlpha = 0.7
-      ctx.stroke()
       ctx.globalAlpha = 1
     }
 
-    const pulse = Math.sin(t * 4) * 0.3 + 0.7
-    const grad = ctx.createRadialGradient(HALF, HALF, 0, HALF, HALF, 40 * pulse)
+    const pulse = Math.sin(t * 6.5) * 0.34 + 0.72
+    const grad = ctx.createRadialGradient(HALF, HALF, 0, HALF, HALF, 74 * pulse)
     grad.addColorStop(0, 'rgba(255,255,255,0.8)')
     grad.addColorStop(1, 'rgba(255,255,255,0)')
     ctx.fillStyle = grad
     ctx.beginPath()
-    ctx.arc(HALF, HALF, 40 * pulse, 0, TAU)
+    ctx.arc(HALF, HALF, 74 * pulse, 0, TAU)
     ctx.fill()
 
-    circularMask(ctx)
+    // circularMask(ctx)
     frames.push(await toJpeg(canvas))
   }
   return frames
@@ -529,7 +571,7 @@ async function generateDigitalCircuit(opts: PatternOptions): Promise<Uint8Array[
   }
 
   for (let f = 0; f < opts.frames; f++) {
-    const phase = f / opts.frames
+    const phase = f / opts.frames * 1
     clear(ctx, '#050510')
 
     // Dim traces
@@ -546,44 +588,148 @@ async function generateDigitalCircuit(opts: PatternOptions): Promise<Uint8Array[
     }
     ctx.globalAlpha = 1
 
-    // Animated pulses — wrap using modulo over totalLen
-    for (const p of paths) {
-      const pos = (phase * p.totalLen * 1.5) % p.totalLen
-
+    // Animated pulses with fading trails.
+    const samplePointAtDistance = (pts: [number, number][], dist: number): [number, number] => {
       let acc = 0
-      for (let i = 1; i < p.points.length; i++) {
-        const dx = p.points[i][0] - p.points[i - 1][0]
-        const dy = p.points[i][1] - p.points[i - 1][1]
+      for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i][0] - pts[i - 1][0]
+        const dy = pts[i][1] - pts[i - 1][1]
         const segLen = Math.sqrt(dx * dx + dy * dy)
-        if (pos >= acc && pos < acc + segLen) {
-          const frac = (pos - acc) / segLen
-          const px = p.points[i - 1][0] + dx * frac
-          const py = p.points[i - 1][1] + dy * frac
-          ctx.beginPath()
-          ctx.arc(px, py, 3, 0, TAU)
-          ctx.fillStyle = '#fff'
-          ctx.fill()
-          const glow = ctx.createRadialGradient(px, py, 0, px, py, 12)
-          glow.addColorStop(0, p.color)
-          glow.addColorStop(1, 'transparent')
-          ctx.fillStyle = glow
-          ctx.globalAlpha = 0.5
-          ctx.beginPath()
-          ctx.arc(px, py, 12, 0, TAU)
-          ctx.fill()
-          ctx.globalAlpha = 1
-          break
+        if (dist >= acc && dist <= acc + segLen) {
+          const frac = segLen === 0 ? 0 : (dist - acc) / segLen
+          return [pts[i - 1][0] + dx * frac, pts[i - 1][1] + dy * frac]
         }
         acc += segLen
       }
+      return pts[pts.length - 1]
+    }
 
+    for (const p of paths) {
+      const speed = 1.6
+      const headPos = (phase * p.totalLen * speed) % p.totalLen
+
+      // trail points behind head, fading out
+      const trailSteps = 10
+      const trailSpan = 56
+      for (let t = trailSteps; t >= 0; t--) {
+        const trailDist = (headPos - (t / trailSteps) * trailSpan + p.totalLen) % p.totalLen
+        const [px, py] = samplePointAtDistance(p.points, trailDist)
+        const alpha = 1 - t / (trailSteps + 1)
+        const radius = 2 + alpha * 4
+
+        ctx.beginPath()
+        ctx.arc(px, py, radius, 0, TAU)
+        ctx.fillStyle = `rgba(255,255,255,${0.22 + alpha * 0.75})`
+        ctx.fill()
+
+        const glow = ctx.createRadialGradient(px, py, 0, px, py, radius * 3.2)
+        glow.addColorStop(0, p.color)
+        glow.addColorStop(1, 'transparent')
+        ctx.fillStyle = glow
+        ctx.globalAlpha = 0.25 + alpha * 0.55
+        ctx.beginPath()
+        ctx.arc(px, py, radius * 3.2, 0, TAU)
+        ctx.fill()
+        ctx.globalAlpha = 1
+      }
+
+      // Larger filled nodes (junction dots)
       for (const pt of p.points) {
         ctx.beginPath()
-        ctx.arc(pt[0], pt[1], 2, 0, TAU)
-        ctx.fillStyle = 'rgba(100,200,255,0.3)'
+        ctx.arc(pt[0], pt[1], 4.2, 0, TAU)
+        ctx.fillStyle = 'rgba(120,220,255,0.5)'
+        ctx.fill()
+        ctx.beginPath()
+        ctx.arc(pt[0], pt[1], 2.2, 0, TAU)
+        ctx.fillStyle = 'rgba(220,255,255,0.95)'
         ctx.fill()
       }
     }
+
+    circularMask(ctx)
+    frames.push(await toJpeg(canvas))
+  }
+  return frames
+}
+
+// ═══════════════════════════════════════════════════════
+// 12. Hypno Toad  ✨ NEW
+// ═══════════════════════════════════════════════════════
+
+async function generateHypnoToad(opts: PatternOptions): Promise<Uint8Array[]> {
+  const [canvas, ctx] = createCanvas()
+  const frames: Uint8Array[] = []
+
+  const eyeOffsetX = 86
+  const eyeY = HALF - 8
+  const eyeRadius = 78
+
+  for (let f = 0; f < opts.frames; f++) {
+    const phase = f / opts.frames
+    const t = phase * TAU
+    clear(ctx, '#120412')
+
+    const bg = ctx.createRadialGradient(HALF, HALF, 10, HALF, HALF, RADIUS)
+    bg.addColorStop(0, 'rgba(110,30,130,0.35)')
+    bg.addColorStop(1, 'rgba(0,0,0,0.9)')
+    ctx.fillStyle = bg
+    ctx.beginPath()
+    ctx.arc(HALF, HALF, RADIUS, 0, TAU)
+    ctx.fill()
+
+    const drawEye = (cx: number, cy: number, phaseShift: number) => {
+      // Outer eye base
+      ctx.beginPath()
+      ctx.arc(cx, cy, eyeRadius + 8, 0, TAU)
+      ctx.fillStyle = '#d8f1a2'
+      ctx.fill()
+
+      // Hypnotic concentric rings
+      const ringCount = 11
+      for (let i = 0; i < ringCount; i++) {
+        const p = i / ringCount
+        const pulse = 0.85 + Math.sin(t * 2.2 + phaseShift + i * 0.6) * 0.12
+        const r = (eyeRadius - 2) * (1 - p) * pulse
+        if (r < 3) continue
+
+        const hue = (300 + i * 18 + phase * 180) % 360
+        ctx.beginPath()
+        ctx.arc(cx, cy, r, 0, TAU)
+        ctx.fillStyle = `hsl(${hue}, 95%, ${52 - i * 1.5}%)`
+        ctx.fill()
+      }
+
+      // Pupil wobble
+      const px = cx + Math.cos(t * 3 + phaseShift) * 9
+      const py = cy + Math.sin(t * 2.4 + phaseShift) * 6
+      ctx.beginPath()
+      ctx.arc(px, py, 13, 0, TAU)
+      ctx.fillStyle = '#070707'
+      ctx.fill()
+
+      // Eye specular highlight
+      ctx.beginPath()
+      ctx.arc(cx - 24, cy - 20, 10, 0, TAU)
+      ctx.fillStyle = 'rgba(255,255,255,0.65)'
+      ctx.fill()
+    }
+
+    drawEye(HALF - eyeOffsetX, eyeY, 0)
+    drawEye(HALF + eyeOffsetX, eyeY, Math.PI)
+
+    // Mouth + subtle pulse
+    ctx.beginPath()
+    ctx.arc(HALF, HALF + 84, 74, 0.08 * Math.PI, 0.92 * Math.PI)
+    ctx.lineWidth = 8
+    ctx.strokeStyle = 'rgba(120,240,120,0.75)'
+    ctx.stroke()
+
+    const lipPulse = 0.5 + 0.5 * Math.sin(t * 4)
+    ctx.beginPath()
+    ctx.arc(HALF, HALF + 84, 74, 0.08 * Math.PI, 0.92 * Math.PI)
+    ctx.lineWidth = 3
+    ctx.strokeStyle = `rgba(220,255,220,${0.25 + lipPulse * 0.35})`
+    ctx.stroke()
 
     circularMask(ctx)
     frames.push(await toJpeg(canvas))
@@ -722,16 +868,16 @@ async function generateEmojiBurst(opts: PatternOptions): Promise<Uint8Array[]> {
   const rng = mulberry32(2025)
 
   const emojis = ['🔥', '⭐', '💜', '🌈', '✨', '🎉', '💎', '🌸', '🚀', '🎶', '💥', '🌀']
-  const particleCount = 28
+  const particleCount = 44
 
   // Each particle has a fixed trajectory from center outward, looping
   const particles = Array.from({ length: particleCount }, () => {
     const angle = rng() * TAU
-    const speed = 0.3 + rng() * 0.7 // fraction of RADIUS per cycle
+    const speed = 1.2 + rng() * 0.55 // aggressively reaches outer mask edge
     const phaseOffset = rng() // stagger launches
     const emoji = emojis[Math.floor(rng() * emojis.length)]
     const spin = (rng() - 0.5) * TAU * 2 // rotation per cycle
-    const sizeBase = 18 + rng() * 18
+    const sizeBase = 24 + rng() * 24
     return { angle, speed, phaseOffset, emoji, spin, sizeBase }
   })
 
@@ -751,7 +897,8 @@ async function generateEmojiBurst(opts: PatternOptions): Promise<Uint8Array[]> {
     for (const p of particles) {
       // t goes 0→1 for this particle's journey outward, then wraps
       const t = ((phase + p.phaseOffset) % 1)
-      const dist = t * RADIUS * p.speed * 2
+      const easeOut = 1 - (1 - t) * (1 - t)
+      const dist = easeOut * (RADIUS + 42) * p.speed
       if (dist > RADIUS + 20) continue
 
       const x = HALF + Math.cos(p.angle) * dist
@@ -763,13 +910,14 @@ async function generateEmojiBurst(opts: PatternOptions): Promise<Uint8Array[]> {
       else if (t > 0.7) alpha = Math.max(0, 1 - (t - 0.7) / 0.3)
 
       // Size: starts small, grows, then shrinks slightly
-      const sizeMul = t < 0.2 ? t / 0.2 : 1 - (t - 0.2) * 0.3
-      const size = p.sizeBase * Math.max(0.3, sizeMul)
+      const sizeMul = t < 0.16 ? t / 0.16 : 1 - (t - 0.16) * 0.22
+      const edgeBoost = 0.88 + 0.4 * Math.min(1, dist / RADIUS)
+      const size = p.sizeBase * Math.max(0.34, sizeMul) * edgeBoost
 
       ctx.save()
       ctx.translate(x, y)
       ctx.rotate(p.spin * phase)
-      ctx.globalAlpha = alpha * 0.9
+      ctx.globalAlpha = 1; //alpha * 0.9
       ctx.font = `${Math.round(size)}px serif`
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
@@ -778,7 +926,7 @@ async function generateEmojiBurst(opts: PatternOptions): Promise<Uint8Array[]> {
     }
     ctx.globalAlpha = 1
 
-    circularMask(ctx)
+    // circularMask(ctx)
     frames.push(await toJpeg(canvas))
   }
   return frames
@@ -837,6 +985,13 @@ export const PATTERNS: PatternDef[] = [
     icon: '🌀',
     description: 'Twisting neon spiral arms',
     generate: generateHypnoticSpirals,
+  },
+  {
+    id: 'hypnotoad',
+    name: 'Hypno Toad',
+    icon: '🐸',
+    description: 'Staring eyes with hypnotic rings',
+    generate: generateHypnoToad,
   },
   {
     id: 'circuit',

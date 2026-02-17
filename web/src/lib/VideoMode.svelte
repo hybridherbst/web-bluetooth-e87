@@ -33,6 +33,10 @@
     onSelectVideo, onGeneratePreview,
   }: Props = $props()
 
+  let lastAutoPreviewSignature = $state('')
+
+  const AUTO_PREVIEW_DEBOUNCE_MS = 300
+
   $effect(() => {
     // clamp trim start < trim end
     if (videoTrimStart >= videoTrimEnd && videoDuration > 0) {
@@ -47,6 +51,32 @@
   function estimatedSize(): number {
     return estimatedFrames() * 8000 + 6000
   }
+
+  $effect(() => {
+    if (!selectedFile || videoDuration <= 0) return
+    if (isWriting || isGeneratingPreview) return
+
+    const signature = [
+      selectedFile.name,
+      selectedFile.size,
+      selectedFile.lastModified,
+      videoFps,
+      videoTrimStart.toFixed(2),
+      videoTrimEnd.toFixed(2),
+      videoZoom.toFixed(2),
+      videoZoomX.toFixed(2),
+      videoZoomY.toFixed(2),
+    ].join('|')
+
+    if (signature === lastAutoPreviewSignature) return
+
+    const timeout = setTimeout(() => {
+      lastAutoPreviewSignature = signature
+      onGeneratePreview()
+    }, AUTO_PREVIEW_DEBOUNCE_MS)
+
+    return () => clearTimeout(timeout)
+  })
 </script>
 
 <div class="image-source">
