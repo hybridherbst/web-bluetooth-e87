@@ -171,18 +171,38 @@ async function findCharacteristics(
     return candidates.some((c) => normUuid.includes(normalize(c)))
   }
 
-  const primaryServices = await targetServer.getPrimaryServices()
-  const services: BluetoothRemoteGATTService[] = [...primaryServices]
-  for (const primary of primaryServices) {
-    try {
-      const included = await primary.getIncludedServices()
-      if (included.length) {
-        log?.(`Primary ${primary.uuid} has ${included.length} included service(s).`)
-        services.push(...included)
-      }
-    } catch { /* ignore */ }
+  // Try a full primary-services enumeration first (fast path). On Windows
+  // the stack can be flaky, so if that fails or returns nothing we fall back
+  // to querying the specific candidate services one-by-one.
+  let services: BluetoothRemoteGATTService[] = []
+  try {
+    const primaryServices = await targetServer.getPrimaryServices()
+    services = [...primaryServices]
+    for (const primary of primaryServices) {
+      try {
+        const included = await primary.getIncludedServices()
+        if (included.length) {
+          log?.(`Primary ${primary.uuid} has ${included.length} included service(s).`)
+          services.push(...included)
+        }
+      } catch { /* ignore */ }
+    }
+  } catch (err) {
+    log?.(`Primary services enumeration failed: ${(err as Error).message} — falling back to per-candidate lookup`)
   }
 
+  // Fallback: query candidate service UUIDs individually (more robust on Win)
+  if (!services.length) {
+    for (const candidate of SERVICE_CANDIDATES) {
+      try {
+        const s = await targetServer.getPrimaryService(candidate as BluetoothServiceUUID)
+        services.push(s)
+        log?.(`Found service candidate ${s.uuid}`)
+      } catch { /* ignore - candidate not present */ }
+    }
+  }
+
+  // Dedupe discovered services
   const dedupedServices: BluetoothRemoteGATTService[] = []
   const seenServiceUuids = new Set<string>()
   for (const s of services) {
@@ -258,10 +278,110 @@ export async function connectE87(log?: (msg: string) => void): Promise<E87Connec
     optionalServices: SERVICE_CANDIDATES,
   })
 
-  const server = (await device.gatt?.connect()) ?? null
-  if (!server) throw new Error('No GATT server available.')
+  // GATT connect + service discovery can fail on Windows (and sometimes macOS).
+  //
+  // On Windows, Chrome historically used the cached-mode WinRT
+  // GetGattServicesAsync() API which causes the OS BLE stack to drop the
+  // connection before GATT discovery completes (Chromium #376885284, fixed in
+  // Chrome ≈132 via uncached-mode discovery).  Older Chrome versions still
+  // exhibit this: the GATT server reports "connected" momentarily but the
+  // underlying radio link is torn down within a few hundred ms.
+  //
+  // The correct approach (per the official Chrome automatic-reconnect sample
+  // and the Chromium BLE team) is:
+  //
+  //   1.  Call device.gatt.connect() and let the returned promise settle —
+  //       do NOT insert a sleep() between connect() and service discovery.
+  //       connect() itself is the async handshake; adding a delay only widens
+  //       the window for Windows to tear down the link.
+  //
+  //   2.  Immediately proceed to service/characteristic discovery.  If the
+  //       connection was dropped (Windows cached-mode bug or transient radio
+  //       issue) this will throw, which we catch and retry.
+  //
+  //   3.  Use exponential back-off between retries.  Windows needs ~7 s for
+  //       its internal BLE cleanup before a fresh connect attempt can succeed.
+  //
+  //   4.  Fully disconnect before each retry so the OS can release the old
+  //       GATT session resources.
 
-  const chars = await findCharacteristics(server, log)
+  const isWindows = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
+  const MAX_ATTEMPTS = isWindows ? 5 : 3
+  // Exponential back-off base delay (ms).  Windows needs longer gaps because
+  // the WinRT BLE stack holds resources for ~7 s after a failed attempt.
+  const BASE_DELAY_MS = isWindows ? 2000 : 500
+
+  let server: BluetoothRemoteGATTServer | null = null
+  let chars: Awaited<ReturnType<typeof findCharacteristics>> | null = null
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Track whether the GATT server fires a disconnect event during this attempt
+    let disconnectedDuringAttempt = false
+
+    try {
+      log?.(`GATT connect attempt ${attempt}/${MAX_ATTEMPTS}...`)
+
+      // Ensure any stale connection from a previous attempt is fully torn down
+      // before asking the OS to connect again.
+      if (server) {
+        try { server.disconnect() } catch { /* ignore */ }
+        server = null
+      }
+
+      const onDisconnect = () => {
+        disconnectedDuringAttempt = true
+        log?.('GATT server reported disconnected event during connect attempt.')
+      }
+
+      // ── Step 1: connect() ──
+      // The promise returned by connect() resolves once the BLE link is
+      // established.  Do NOT add a sleep before service discovery.
+      server = (await device.gatt?.connect()) ?? null
+      if (!server) throw new Error('No GATT server available.')
+
+      try { server.addEventListener('gattserverdisconnected', onDisconnect) } catch { /* ignore */ }
+
+      // ── Step 2: immediate service / characteristic discovery ──
+      // If the Windows cached-mode bug strikes, this will throw because the
+      // server is already gone.  That is the correct signal to retry — much
+      // more reliable than checking server.connected after an arbitrary sleep.
+      chars = await findCharacteristics(server, log)
+
+      try { server.removeEventListener('gattserverdisconnected', onDisconnect) } catch { /* ignore */ }
+
+      // Guard: the discovery call above may have "succeeded" on Windows by
+      // returning stale cached data even though the radio link dropped.
+      if (disconnectedDuringAttempt || !server.connected) {
+        throw new Error('GATT server disconnected during service discovery.')
+      }
+
+      log?.(`GATT connected on attempt ${attempt}.`)
+      break
+    } catch (err) {
+      const msg = (err as Error).message
+      log?.(`GATT attempt ${attempt} failed: ${msg}`)
+
+      // Tear down cleanly so the OS can release BLE resources
+      try { server?.disconnect() } catch { /* ignore */ }
+      server = null
+      chars = null
+
+      if (attempt === MAX_ATTEMPTS) {
+        throw new Error(`Failed to connect after ${MAX_ATTEMPTS} attempts: ${msg}`)
+      }
+
+      // Exponential back-off: BASE × 2^(attempt-1)
+      // Windows: 2 s → 4 s → 8 s → 16 s  (gives the WinRT stack time to
+      //          release the previous GATT session)
+      // macOS:   0.5 s → 1 s → 2 s
+      const backoff = BASE_DELAY_MS * Math.pow(2, attempt - 1)
+      log?.(`Retrying in ${(backoff / 1000).toFixed(1)}s...`)
+      await sleep(backoff)
+    }
+  }
+
+  if (!server || !chars) throw new Error('GATT connection failed.')
+
   const notificationQueue: Uint8Array[] = []
 
   let batteryLevel: number | null = null
@@ -657,19 +777,28 @@ export async function writeFileE87(opts: UploadOptions): Promise<void> {
       log(`Sent cmd 0x1C response${statusByte === 0x00 ? '. Upload complete!' : ' (acknowledging error).'}`)
     }
 
-    let useWindowing = false
-    let firstWinAck: E87Frame | null = null
+    // The device ALWAYS sends a window ack (flag=0x80, cmd=0x1d) to start
+    // the windowed transfer.  Previous code had a 2 s timeout here and fell
+    // back to a "streaming mode" that blasted all frames immediately with
+    // no flow control — that was wrong and the root cause of the burst bug.
+    //
+    // Give the device a generous timeout (matches other ACK waits) and if
+    // it still doesn't arrive, abort cleanly rather than corrupt the
+    // transfer with an uncontrolled dump.
+    let firstWinAck: E87Frame
     try {
       firstWinAck = await waitFrame(
         (f) => f.flag === 0x80 && f.cmd === 0x1d,
-        2000, 'initial window ack (probing for flow control)'
+        10000, 'initial window ack (windowed flow control)'
       )
-      useWindowing = true
     } catch {
-      log('No window ack received — using streaming mode (no flow control).')
+      throw new Error(
+        'Device did not send the initial window ACK within 10 s — cannot start data transfer. ' +
+        'Please retry the upload.'
+      )
     }
 
-    if (useWindowing && firstWinAck) {
+    {
       log('Using windowed flow control.')
       let currentAck: E87Frame | null = firstWinAck
       let done = false
@@ -727,87 +856,6 @@ export async function writeFileE87(opts: UploadOptions): Promise<void> {
 
         currentAck = frame
       }
-    } else {
-      log('Streaming all chunks (tail then head)...')
-
-      const headSize = Math.min(E87_DATA_CHUNK_SIZE, jpegBytes.length)
-      const tailLen = jpegBytes.length - headSize
-      const tailChunks = Math.ceil(tailLen / E87_DATA_CHUNK_SIZE)
-
-      for (let i = 0; i < tailChunks; i++) {
-        if (cancelRequested()) throw new Error('Write cancelled.')
-        const chunkOffset = headSize + i * E87_DATA_CHUNK_SIZE
-        const end = Math.min(chunkOffset + E87_DATA_CHUNK_SIZE, jpegBytes.length)
-        const payload = jpegBytes.slice(chunkOffset, end)
-        const slot = i & 0x07
-
-        const crc = crc16xmodem(payload)
-        const body = new Uint8Array(5 + payload.length)
-        body[0] = seq & 0xff
-        body[1] = 0x1d
-        body[2] = slot & 0xff
-        body[3] = (crc >> 8) & 0xff
-        body[4] = crc & 0xff
-        body.set(payload, 5)
-
-        await sendE87Frame(0x80, 0x01, body)
-        sentChunks += 1
-        totalBytesSent += payload.length
-        onProgress(totalBytesSent, jpegBytes.length, sentChunks, totalChunks)
-        seq = (seq + 1) & 0xff
-        if (interChunkDelayMs > 0) await sleep(interChunkDelayMs)
-      }
-
-      {
-        const payload = jpegBytes.slice(0, headSize)
-        log(`Sending header commit chunk (slot=0, ${payload.length} bytes)`)
-        const crc = crc16xmodem(payload)
-        const body = new Uint8Array(5 + payload.length)
-        body[0] = seq & 0xff
-        body[1] = 0x1d
-        body[2] = 0x00
-        body[3] = (crc >> 8) & 0xff
-        body[4] = crc & 0xff
-        body.set(payload, 5)
-
-        await sendE87Frame(0x80, 0x01, body)
-        sentChunks += 1
-        totalBytesSent += payload.length
-        onProgress(totalBytesSent, jpegBytes.length, sentChunks, totalChunks)
-        seq = (seq + 1) & 0xff
-      }
-
-      log('All chunks sent. Waiting for completion...')
-      try {
-        for (let retries = 0; retries < 20; retries++) {
-          const frame = await waitFrame(
-            (f) => (f.flag === 0x80 && f.cmd === 0x1d) || f.cmd === 0x20 || f.cmd === 0x1c,
-            15000, 'FILE_COMPLETE or session close'
-          )
-          if (frame.cmd === 0x1d) {
-            const ackStatus = frame.body.length >= 2 ? frame.body[1] : 0xff
-            log(`Late window ack (status=0x${ackStatus.toString(16)}) — ignoring.`)
-            continue
-          }
-          if (frame.cmd === 0x20 && frame.flag === 0xc0) {
-            const deviceSeq20 = frame.body[0] ?? seq
-            log(`Received FILE_COMPLETE cmd 0x20 (seq=${deviceSeq20}). Auto-responded: ${fileCompleteHandled}`)
-            if (!fileCompleteHandled) {
-              await sendE87Frame(0x00, 0x20, buildFilePathResponse(deviceSeq20, uploadMode))
-              fileCompleteHandled = true
-              log('Path response sent.')
-            }
-            log('Waiting for SESSION_CLOSE...')
-            const closeFrame = await waitFrame(
-              (f) => f.cmd === 0x1c, 15000, 'session close (cmd 0x1c)'
-            )
-            await handleCompletion(closeFrame)
-            break
-          }
-          await handleCompletion(frame)
-          break
-        }
-      } catch { log('No completion handshake received (image may still be applied).') }
     }
   } finally {
     // Clean up auto-responder
