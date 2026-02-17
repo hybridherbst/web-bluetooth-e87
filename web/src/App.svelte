@@ -2,7 +2,25 @@
   import { formatDuration, formatBytes } from './lib/utils'
   import { MAX_UPLOAD_BYTES, imageFileTo368JpegBytes, imagesToAvi, videoToAvi } from './lib/image-processing'
   import { parseAviFrames, readAviFps } from './lib/avi-preview'
-  import { connectE87, disconnectE87, writeFileE87, type E87Connection, type UploadMode } from './lib/e87-protocol'
+  import {
+    connectE87,
+    disconnectE87,
+    writeFileE87,
+    refreshBatteryE87,
+    listSmallFilesE87,
+    readSmallFileE87,
+    deleteSmallFileE87,
+    getTargetInfoE87,
+    getTargetFeatureMapE87,
+    getSysInfoE87,
+    browseFilesE87,
+    stopBrowseE87,
+    getScreenInfoE87,
+    type E87Connection,
+    type UploadMode,
+    type E87SmallFileEntry,
+    type E87FileBrowseEntry,
+  } from './lib/e87-protocol'
   import { buildMjpgAvi } from './avi-builder'
   import type { PatternDef } from './pattern-generators'
 
@@ -29,6 +47,13 @@
   let status = $state('Disconnected')
   let batteryLevel: number | null = $state(null)
   let batteryUpdatedAt = $state('')
+
+  let isDeviceOpsBusy = $state(false)
+  let smallFiles: E87SmallFileEntry[] = $state([])
+  let browseEntries: E87FileBrowseEntry[] = $state([])
+  let selectedSmallFileKey = $state('')
+  let smallFileReadText = $state('')
+  let rcspInfoText = $state('')
 
   let logs: string[] = $state([])
 
@@ -90,6 +115,16 @@
       batteryLevel = conn.batteryLevel
       batteryUpdatedAt = conn.batteryUpdatedAt
       status = `Connected: ${conn.device.name ?? 'Unknown device'}`
+      // Auto-read battery via Qix 9E protocol
+      try {
+        const result = await refreshBatteryE87(conn, log)
+        batteryLevel = result.level
+        batteryUpdatedAt = result.updatedAt
+      } catch { /* best effort */ }
+      // Auto-read screen info
+      try {
+        await getScreenInfoE87(conn, log)
+      } catch { /* best effort */ }
     } catch (error) {
       status = `Connection failed: ${(error as Error).message}`
       log(status)
@@ -112,7 +147,255 @@
     status = 'Disconnected'
     progress = 0
     progressLabel = ''
+    smallFiles = []
+    browseEntries = []
+    selectedSmallFileKey = ''
+    smallFileReadText = ''
     log('Disconnected.')
+  }
+
+  // ─── Device utility actions ───
+
+  function smallFileKey(file: E87SmallFileEntry): string {
+    return `${file.type}:${file.id}`
+  }
+
+  function getSelectedSmallFile(): E87SmallFileEntry | null {
+    if (!selectedSmallFileKey) return null
+    return smallFiles.find((f) => smallFileKey(f) === selectedSmallFileKey) ?? null
+  }
+
+  async function refreshBattery(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const result = await refreshBatteryE87(conn, log)
+      batteryLevel = result.level
+      batteryUpdatedAt = result.updatedAt
+      if (result.level === null) {
+        status = 'Battery service unavailable on this device.'
+      }
+    } catch (error) {
+      status = `Battery read failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function listSmallFiles(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    smallFileReadText = ''
+    try {
+      const items = await listSmallFilesE87(conn, log)
+      smallFiles = items
+      if (items.length === 0) {
+        status = 'No small files reported by device.'
+        selectedSmallFileKey = ''
+      } else {
+        status = `Found ${items.length} small file(s).`
+        if (!getSelectedSmallFile()) {
+          selectedSmallFileKey = smallFileKey(items[0])
+        }
+      }
+    } catch (error) {
+      status = `List files failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function browseFiles(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      // Try files first, then folders if empty
+      let results = await browseFilesE87(conn, log, { type: 1, readNum: 50 })
+      if (results.length === 0) {
+        results = await browseFilesE87(conn, log, { type: 0, readNum: 50 })
+      }
+      browseEntries = results
+      const total = results.length
+      rcspInfoText = JSON.stringify({
+        command: 'FileBrowseCmd',
+        totalEntries: total,
+        entries: results,
+      }, null, 2)
+      status = total > 0 ? `FileBrowse: found ${total} entries.` : 'FileBrowse: no entries found on any storage.'
+    } catch (error) {
+      status = `FileBrowse failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function queryScreenInfo(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const info = await getScreenInfoE87(conn, log)
+      rcspInfoText = JSON.stringify({
+        command: 'GetScreenInfoCmd',
+        info,
+      }, null, 2)
+      status = info ? `Screen: ${info.width}x${info.height}` : 'ScreenInfo: no response.'
+    } catch (error) {
+      status = `ScreenInfo failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function readSelectedSmallFile(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    const item = getSelectedSmallFile()
+    if (!item) {
+      status = 'No file selected.'
+      return
+    }
+
+    isDeviceOpsBusy = true
+    try {
+      const { data, crc16 } = await readSmallFileE87(conn, item, log)
+      const asText = new TextDecoder().decode(data)
+      const crcInfo = crc16 === null ? 'n/a' : `0x${crc16.toString(16).padStart(4, '0')}`
+      smallFileReadText = `type=${item.typeName} id=${item.id} size=${data.length} crc=${crcInfo}\n\n${asText}`
+      status = `Read ${data.length} byte(s) from ${item.typeName}#${item.id}.`
+    } catch (error) {
+      status = `Read file failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function deleteSelectedSmallFile(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    const item = getSelectedSmallFile()
+    if (!item) {
+      status = 'No file selected.'
+      return
+    }
+
+    isDeviceOpsBusy = true
+    try {
+      await deleteSmallFileE87(conn, item, log)
+      const removedKey = smallFileKey(item)
+      smallFiles = smallFiles.filter((f) => smallFileKey(f) !== removedKey)
+      selectedSmallFileKey = smallFiles.length ? smallFileKey(smallFiles[0]) : ''
+      smallFileReadText = ''
+      status = `Deleted ${item.typeName}#${item.id}.`
+    } catch (error) {
+      status = `Delete file failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function getTargetFeatureMap(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const res = await getTargetFeatureMapE87(conn, log)
+      rcspInfoText = JSON.stringify({
+        command: 'GetTargetFeatureMapCmd',
+        maskHex: `0x${res.mask.toString(16).padStart(8, '0')}`,
+        supported: res.mask !== 0,
+        raw: res.raw,
+      }, null, 2)
+      status = res.mask !== 0
+        ? `FeatureMap: 0x${res.mask.toString(16).padStart(8, '0')}`
+        : 'FeatureMap: not supported by this device.'
+    } catch (error) {
+      status = `GetTargetFeatureMapCmd failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function getTargetInfo(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const res = await getTargetInfoE87(conn, log)
+      rcspInfoText = JSON.stringify({
+        command: 'GetTargetInfoCmd',
+        requestMaskHex: `0x${res.requestMask.toString(16)}`,
+        requestPlatform: res.requestPlatform,
+        attrs: res.attrs,
+        payloadHex: res.payload,
+        rawBodyHex: res.raw,
+      }, null, 2)
+      status = 'GetTargetInfoCmd completed.'
+    } catch (error) {
+      status = `GetTargetInfoCmd failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function getSysInfo(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      const res = await getSysInfoE87(conn, log)
+      const batteryAttr = res.attrs.find((a) => a.type === 0)
+      const batteryGuess = batteryAttr?.decoded ?? batteryAttr?.dataHex ?? null
+      rcspInfoText = JSON.stringify({
+        command: 'GetSysInfoCmd',
+        functionHex: `0x${res.function.toString(16)}`,
+        batteryGuess,
+        attrs: res.attrs,
+        rawPayloadHex: res.raw,
+      }, null, 2)
+      if (batteryAttr?.decoded?.endsWith('%')) {
+        const n = Number.parseInt(batteryAttr.decoded, 10)
+        if (Number.isFinite(n)) {
+          batteryLevel = n
+          batteryUpdatedAt = new Date().toLocaleTimeString()
+        }
+      }
+      status = 'GetSysInfoCmd completed.'
+    } catch (error) {
+      status = `GetSysInfoCmd failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
   }
 
   // ─── File handling ───
@@ -401,10 +684,37 @@
       </button>
       <button onclick={disconnect} disabled={!conn?.server?.connected || isWriting}>Disconnect</button>
       <button class="secondary" onclick={cancelWrite} disabled={!isWriting}>Cancel</button>
+      <button onclick={refreshBattery} disabled={!conn || isWriting || isDeviceOpsBusy}>🔋 Battery</button>
+      <button onclick={browseFiles} disabled={!conn || isWriting || isDeviceOpsBusy}>📂 Browse Files</button>
+      <button onclick={listSmallFiles} disabled={!conn || isWriting || isDeviceOpsBusy}>List SmallFiles</button>
+      <button onclick={readSelectedSmallFile} disabled={!conn || isWriting || isDeviceOpsBusy || !selectedSmallFileKey}>Read selected</button>
+      <button class="danger" onclick={deleteSelectedSmallFile} disabled={!conn || isWriting || isDeviceOpsBusy || !selectedSmallFileKey}>Delete selected</button>
+      <button onclick={getTargetFeatureMap} disabled={!conn || isWriting || isDeviceOpsBusy}>FeatureMap</button>
+      <button onclick={getTargetInfo} disabled={!conn || isWriting || isDeviceOpsBusy}>TargetInfo</button>
+      <button onclick={getSysInfo} disabled={!conn || isWriting || isDeviceOpsBusy}>SysInfo</button>
+      <button onclick={queryScreenInfo} disabled={!conn || isWriting || isDeviceOpsBusy}>ScreenInfo</button>
     </div>
     <div class="status">Status: {status}</div>
     {#if batteryLevel !== null}
       <div class="status">Battery: {batteryLevel}% <span class="dim">({batteryUpdatedAt})</span></div>
+    {/if}
+
+    <div class="settings" style="margin-top:0.5rem">
+      <label style="min-width: 280px; flex:1">
+        <span>Small files</span>
+        <select bind:value={selectedSmallFileKey} disabled={isDeviceOpsBusy || smallFiles.length === 0}>
+          <option value="">-- none --</option>
+          {#each smallFiles as f}
+            <option value={smallFileKey(f)}>{f.typeName} — id {f.id} — {formatBytes(f.size)}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+    {#if smallFileReadText}
+      <textarea readonly rows="8" value={smallFileReadText}></textarea>
+    {/if}
+    {#if rcspInfoText}
+      <textarea readonly rows="10" value={rcspInfoText}></textarea>
     {/if}
   </section>
 
