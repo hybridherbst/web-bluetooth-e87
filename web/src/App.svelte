@@ -549,10 +549,11 @@
     min-height: 100vh;
   }
   .app {
-    width: min(1024px, 92vw);
-    min-width: min(1024px, 90vw);
+    width: 100%;
+    max-width: 1024px;
     margin: 0 auto;
-    padding: 1.5rem;
+    padding: 1rem;
+    box-sizing: border-box;
   }
   h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
   .hint { margin: 0 0 0.8rem; color: #8badd4; font-size: 0.88rem; }
@@ -586,7 +587,7 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     line-height: 1.3;
   }
-  input[type="number"] { width: 90px; }
+  input[type="number"] { width: 90px; max-width: 100%; }
   button { cursor: pointer; font-weight: 600; }
   button:hover:not(:disabled) { border-color: rgba(129, 178, 255, 0.9); }
   button:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -605,5 +606,19 @@
     color: #b8d4f0;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.8rem; line-height: 1.35; padding: 1px 0;
+    word-break: break-all;
+  }
+
+  /* ─── Mobile ─── */
+  @media (max-width: 600px) {
+    .app { padding: 0.5rem; }
+    h1 { font-size: 1.25rem; }
+    .panel { padding: 0.7rem; border-radius: 8px; }
+    .row { gap: 0.4rem; }
+    .settings { gap: 0.5rem; }
+    .settings label { min-width: 0; flex: 1 1 auto; }
+    button { padding: 0.5rem 0.6rem; font-size: 0.85rem; }
+    .logs ul { max-height: 160px; }
+    .logs li { font-size: 0.7rem; }
   }
 </style>

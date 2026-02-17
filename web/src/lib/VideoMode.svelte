@@ -93,7 +93,7 @@
   {#if previewUrl}
     <div class="preview">
       <!-- svelte-ignore a11y_media_has_caption -->
-      <video src={previewUrl} style="max-width:200px;max-height:200px;border:1px solid #334;border-radius:6px" controls muted></video>
+      <video src={previewUrl} style="max-width:min(200px,100%);max-height:200px;border:1px solid #334;border-radius:6px" controls muted></video>
     </div>
   {/if}
 
@@ -102,11 +102,11 @@
     <div class="settings">
       <label>
         <span>Start ({videoTrimStart.toFixed(1)}s)</span>
-        <input type="range" min="0" max={videoDuration} step="0.1" bind:value={videoTrimStart} disabled={isWriting} style="width:140px" />
+        <input type="range" min="0" max={videoDuration} step="0.1" bind:value={videoTrimStart} disabled={isWriting} style="width:100%;min-width:80px;max-width:160px" />
       </label>
       <label>
         <span>End ({videoTrimEnd.toFixed(1)}s)</span>
-        <input type="range" min="0" max={videoDuration} step="0.1" bind:value={videoTrimEnd} disabled={isWriting} style="width:140px" />
+        <input type="range" min="0" max={videoDuration} step="0.1" bind:value={videoTrimEnd} disabled={isWriting} style="width:100%;min-width:80px;max-width:160px" />
       </label>
     </div>
     <p class="dim" style="font-size:0.8rem;margin:0.1rem 0">
@@ -120,15 +120,15 @@
     <div class="settings">
       <label>
         <span>Zoom ({videoZoom.toFixed(1)}x)</span>
-        <input type="range" min="1" max="4" step="0.1" bind:value={videoZoom} disabled={isWriting} style="width:120px" />
+        <input type="range" min="1" max="4" step="0.1" bind:value={videoZoom} disabled={isWriting} style="width:100%;min-width:60px;max-width:140px" />
       </label>
       <label>
         <span>Pan X</span>
-        <input type="range" min="0" max="1" step="0.01" bind:value={videoZoomX} disabled={isWriting} style="width:100px" />
+        <input type="range" min="0" max="1" step="0.01" bind:value={videoZoomX} disabled={isWriting} style="width:100%;min-width:60px;max-width:120px" />
       </label>
       <label>
         <span>Pan Y</span>
-        <input type="range" min="0" max="1" step="0.01" bind:value={videoZoomY} disabled={isWriting} style="width:100px" />
+        <input type="range" min="0" max="1" step="0.01" bind:value={videoZoomY} disabled={isWriting} style="width:100%;min-width:60px;max-width:120px" />
       </label>
     </div>
     <div class="settings">
