@@ -1,10 +1,19 @@
 <script lang="ts">
   import { formatDuration, formatBytes } from './lib/utils'
-  import { MAX_UPLOAD_BYTES, imageFileTo368JpegBytes, imagesToAvi, videoToAvi } from './lib/image-processing'
+  import {
+    MAX_UPLOAD_BYTES,
+    previewBitmapToJpeg,
+    previewBitmapsToAvi,
+    imageFileToPreviewBitmap,
+    imagesToPreviewBitmaps,
+    videoToPreviewBitmaps,
+    type TransformSettings,
+  } from './lib/image-processing'
   import { parseAviFrames, readAviFps } from './lib/avi-preview'
   import { connectE87, disconnectE87, writeFileE87, type E87Connection, type UploadMode } from './lib/e87-protocol'
   import { buildMjpgAvi } from './avi-builder'
   import type { PatternDef } from './pattern-generators'
+  import QRCode from 'qrcode'
 
   import AviPlayer from './lib/AviPlayer.svelte'
   import UploadProgress from './lib/UploadProgress.svelte'
@@ -12,6 +21,67 @@
   import SequenceMode from './lib/SequenceMode.svelte'
   import VideoMode from './lib/VideoMode.svelte'
   import PatternMode from './lib/PatternMode.svelte'
+  import LiveTransformCanvas from './lib/LiveTransformCanvas.svelte'
+  import PreviewModeSwitch from './lib/PreviewModeSwitch.svelte'
+  import QrMode from './lib/QrMode.svelte'
+
+  type PreviewMode = 'live' | 'preview'
+  type QrCellStyle = 'square' | 'round' | 'squircle'
+
+  type SavedSettings = {
+    uploadMode?: UploadMode
+    interChunkDelayMs?: number
+    videoFps?: number
+    sequenceFps?: number
+    patternFrameCount?: number
+    patternFps?: number
+    qrUrl?: string
+    qrDarkColor?: string
+    qrLightColor?: string
+    qrDotStyle?: QrCellStyle
+    qrEdgeStyle?: QrCellStyle
+    qrZoom?: number
+    qrRotation?: number
+    imageBackdropColor?: string
+    imagePreviewMode?: PreviewMode
+    sequencePreviewMode?: PreviewMode
+    videoPreviewMode?: PreviewMode
+    imageScale?: number
+    imagePanX?: number
+    imagePanY?: number
+    sequenceScale?: number
+    sequencePanX?: number
+    sequencePanY?: number
+    videoScale?: number
+    videoPanX?: number
+    videoPanY?: number
+  }
+
+  const SETTINGS_STORAGE_KEY = 'badgeWriterSettings.v2'
+
+  function loadSettings(): SavedSettings {
+    if (typeof window === 'undefined') return {}
+    try {
+      const raw = localStorage.getItem(SETTINGS_STORAGE_KEY)
+      return raw ? JSON.parse(raw) as SavedSettings : {}
+    } catch {
+      return {}
+    }
+  }
+
+  function n(value: unknown, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  }
+
+  function s(value: unknown, fallback: string): string {
+    return typeof value === 'string' ? value : fallback
+  }
+
+  function pm(value: unknown, fallback: PreviewMode): PreviewMode {
+    return value === 'live' || value === 'preview' ? value : fallback
+  }
+
+  const saved = loadSettings()
 
   // ─── Debug flag ───
   const debugMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('debug')
@@ -24,7 +94,7 @@
   let isConnecting = $state(false)
   let isWriting = $state(false)
   let cancelRequested = $state(false)
-  let interChunkDelayMs = $state(0)
+  let interChunkDelayMs = $state(n(saved.interChunkDelayMs, 0))
 
   let status = $state('Disconnected')
   let batteryLevel: number | null = $state(null)
@@ -33,33 +103,67 @@
   let logs: string[] = $state([])
 
   // ─── Upload mode & file state ───
-  let uploadMode: UploadMode = $state('pattern')
+  let uploadMode: UploadMode = $state((saved.uploadMode ?? 'pattern') as UploadMode)
   let selectedFile: File | null = $state(null)
   let selectedFiles: File[] = $state([])
   let previewUrl: string | null = $state(null)
 
   // ─── Mode-specific settings ───
-  let videoFps = $state(12)
-  let sequenceFps = $state(1)
+  let videoFps = $state(n(saved.videoFps, 12))
+  let sequenceFps = $state(n(saved.sequenceFps, 1))
   let videoTrimStart = $state(0)
   let videoTrimEnd = $state(0)
   let videoDuration = $state(0)
-  let videoZoom = $state(1.0)
-  let videoZoomX = $state(0.5)
-  let videoZoomY = $state(0.5)
-  let patternFrameCount = $state(60)
-  let patternFps = $state(12)
+  let patternFrameCount = $state(n(saved.patternFrameCount, 60))
+  let patternFps = $state(n(saved.patternFps, 12))
   let selectedPattern: PatternDef | null = $state(null)
+  let qrUrl = $state(s(saved.qrUrl, 'https://example.com'))
+  let qrDarkColor = $state(s(saved.qrDarkColor, '#111111'))
+  let qrLightColor = $state(s(saved.qrLightColor, '#f5f7ff'))
+  let qrDotStyle: QrCellStyle = $state((saved.qrDotStyle ?? 'round') as QrCellStyle)
+  let qrEdgeStyle: QrCellStyle = $state((saved.qrEdgeStyle ?? 'squircle') as QrCellStyle)
+  let qrZoom = $state(n(saved.qrZoom, 1.08))
+  let qrRotation = $state(n(saved.qrRotation, 0))
+  let imageBackdropColor = $state(s(saved.imageBackdropColor, '#000000'))
 
   // ─── Preview state ───
   let aviPreviewFrames: ImageBitmap[] = $state([])
   let aviPreviewFps = $state(12)
   let isGeneratingPreview = $state(false)
+  let isGeneratingQr = $state(false)
   let isGeneratingPattern = $state(false)
   let preparedPayload: Uint8Array | null = $state(null)
   let preparedPayloadLabel = $state('')
   let preparedIsStillImage = $state(false)
   let aviPlayer: AviPlayer | null = $state(null)
+
+  let imagePreviewMode: PreviewMode = $state(pm(saved.imagePreviewMode, 'live'))
+  let sequencePreviewMode: PreviewMode = $state(pm(saved.sequencePreviewMode, 'live'))
+  let videoPreviewMode: PreviewMode = $state(pm(saved.videoPreviewMode, 'live'))
+
+  let imageLiveFrames: ImageBitmap[] = $state([])
+  let sequenceLiveFrames: ImageBitmap[] = $state([])
+  let videoLiveFrames: ImageBitmap[] = $state([])
+
+  let imageScale = $state(n(saved.imageScale, 1))
+  let imagePanX = $state(n(saved.imagePanX, 0))
+  let imagePanY = $state(n(saved.imagePanY, 0))
+  let sequenceScale = $state(n(saved.sequenceScale, 1))
+  let sequencePanX = $state(n(saved.sequencePanX, 0))
+  let sequencePanY = $state(n(saved.sequencePanY, 0))
+  let videoScale = $state(n(saved.videoScale, 1))
+  let videoPanX = $state(n(saved.videoPanX, 0))
+  let videoPanY = $state(n(saved.videoPanY, 0))
+
+  let videoCacheSignature = $state('')
+  let autoPreviewSignature = $state('')
+  let qrAutoSignature = $state('')
+
+  let videoScrubFrame: ImageBitmap | null = $state(null)
+  let isVideoScrubbing = $state(false)
+  let videoScrubUrl: string | null = $state(null)
+  let videoScrubElement: HTMLVideoElement | null = $state(null)
+  let videoScrubRequestId = $state(0)
 
   // ─── Upload progress state ───
   let progress = $state(0)
@@ -121,66 +225,371 @@
     if (previewUrl && !previewUrl.startsWith('/')) URL.revokeObjectURL(previewUrl)
   }
 
-  function setFile(event: Event): void {
-    const input = event.target as HTMLInputElement
-    const file = input.files?.[0] ?? null
-    selectedFile = file
+  function clearFrames(frames: ImageBitmap[]): void {
+    frames.forEach((frame) => frame.close())
+  }
+
+  function clearAviPreview(): void {
+    aviPlayer?.stop()
+    clearFrames(aviPreviewFrames)
+    aviPreviewFrames = []
+  }
+
+  function clearPreparedState(): void {
     preparedPayload = null
+    preparedPayloadLabel = ''
     preparedIsStillImage = false
-    if (file) {
-      log(`Selected: ${file.name}`)
-      revokePreviewUrl()
-      previewUrl = URL.createObjectURL(file)
+  }
+
+  function makeBlob(bytes: Uint8Array, type: string): Blob {
+    return new Blob([new Uint8Array(bytes)], { type })
+  }
+
+  $effect(() => {
+    if (typeof window === 'undefined') return
+    const persist: SavedSettings = {
+      uploadMode,
+      interChunkDelayMs,
+      videoFps,
+      sequenceFps,
+      patternFrameCount,
+      patternFps,
+      qrUrl,
+      qrDarkColor,
+      qrLightColor,
+      qrDotStyle,
+      qrEdgeStyle,
+      qrZoom,
+      qrRotation,
+      imageBackdropColor,
+      imagePreviewMode,
+      sequencePreviewMode,
+      videoPreviewMode,
+      imageScale,
+      imagePanX,
+      imagePanY,
+      sequenceScale,
+      sequencePanX,
+      sequencePanY,
+      videoScale,
+      videoPanX,
+      videoPanY,
+    }
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(persist))
+  })
+
+  function resetVideoScrubber(): void {
+    videoScrubRequestId += 1
+    if (videoScrubFrame) {
+      videoScrubFrame.close()
+      videoScrubFrame = null
+    }
+    if (videoScrubUrl) {
+      URL.revokeObjectURL(videoScrubUrl)
+      videoScrubUrl = null
+    }
+    videoScrubElement = null
+    isVideoScrubbing = false
+  }
+
+  async function ensureVideoScrubber(): Promise<HTMLVideoElement> {
+    if (videoScrubElement && videoScrubUrl) return videoScrubElement
+    if (!selectedFile) throw new Error('No selected video for scrubbing.')
+
+    videoScrubUrl = URL.createObjectURL(selectedFile)
+    const video = document.createElement('video')
+    video.muted = true
+    video.playsInline = true
+    video.preload = 'auto'
+    await new Promise<void>((resolve, reject) => {
+      video.onloadedmetadata = () => resolve()
+      video.onerror = () => reject(new Error('Could not initialize scrubber video.'))
+      video.src = videoScrubUrl!
+    })
+    videoScrubElement = video
+    return video
+  }
+
+  async function updateVideoScrubFrame(time: number): Promise<void> {
+    const reqId = ++videoScrubRequestId
+    if (!selectedFile) return
+
+    try {
+      const video = await ensureVideoScrubber()
+      const t = Math.max(0, Math.min(videoDuration || video.duration || 0, time))
+      video.currentTime = t
+      await new Promise<void>((resolve) => { video.onseeked = () => resolve() })
+      if (reqId !== videoScrubRequestId) return
+
+      const size = 512
+      const canvas = new OffscreenCanvas(size, size)
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+
+      const srcFullW = video.videoWidth
+      const srcFullH = video.videoHeight
+      const minDim = Math.min(srcFullW, srcFullH)
+      const cropX = (srcFullW - minDim) / 2
+      const cropY = (srcFullH - minDim) / 2
+
+      ctx.fillStyle = 'black'
+      ctx.fillRect(0, 0, size, size)
+      ctx.drawImage(video, cropX, cropY, minDim, minDim, 0, 0, size, size)
+      const bmp = await createImageBitmap(canvas)
+      if (reqId !== videoScrubRequestId) {
+        bmp.close()
+        return
+      }
+      if (videoScrubFrame) videoScrubFrame.close()
+      videoScrubFrame = bmp
+    } catch (err) {
+      log(`Scrub frame failed: ${(err as Error).message}`)
     }
   }
 
-  function setMultipleFiles(event: Event): void {
+  function onVideoScrubStart(): void {
+    isVideoScrubbing = true
+  }
+
+  function onVideoScrubFrame(time: number): void {
+    updateVideoScrubFrame(time).catch((err) => log(`Scrub preview error: ${(err as Error).message}`))
+  }
+
+  function onVideoScrubEnd(): void {
+    isVideoScrubbing = false
+  }
+
+  async function prepareImageLiveFrames(): Promise<void> {
+    clearFrames(imageLiveFrames)
+    imageLiveFrames = []
+    if (!selectedFile) return
+    imageLiveFrames = [await imageFileToPreviewBitmap(selectedFile)]
+  }
+
+  async function prepareSequenceLiveFrames(): Promise<void> {
+    clearFrames(sequenceLiveFrames)
+    sequenceLiveFrames = []
+    if (selectedFiles.length === 0) return
+    sequenceLiveFrames = await imagesToPreviewBitmaps(selectedFiles)
+  }
+
+  async function prepareVideoLiveFrames(): Promise<void> {
+    clearFrames(videoLiveFrames)
+    videoLiveFrames = []
+    if (!selectedFile || videoDuration <= 0) return
+    videoLiveFrames = await videoToPreviewBitmaps(selectedFile, {
+      fps: videoFps,
+      trimStart: videoTrimStart,
+      trimEnd: videoTrimEnd,
+    }, log)
+  }
+
+  async function setFile(event: Event): Promise<void> {
+    resetVideoScrubber()
+    const input = event.target as HTMLInputElement
+    const file = input.files?.[0] ?? null
+    selectedFile = file
+    clearPreparedState()
+    clearAviPreview()
+    revokePreviewUrl()
+    previewUrl = null
+    if (file) {
+      log(`Selected: ${file.name}`)
+      await prepareImageLiveFrames()
+    }
+  }
+
+  async function setMultipleFiles(event: Event): Promise<void> {
+    resetVideoScrubber()
     const input = event.target as HTMLInputElement
     const files = input.files
     if (!files || files.length === 0) return
     selectedFiles = Array.from(files)
-    preparedPayload = null
-    preparedIsStillImage = false
-    log(`Selected ${selectedFiles.length} images for sequence`)
+    clearPreparedState()
+    clearAviPreview()
     revokePreviewUrl()
-    previewUrl = URL.createObjectURL(selectedFiles[0])
+    previewUrl = null
+    log(`Selected ${selectedFiles.length} images for sequence`)
+    await prepareSequenceLiveFrames()
   }
 
-  function setVideoFile(event: Event): void {
+  async function setVideoFile(event: Event): Promise<void> {
     const input = event.target as HTMLInputElement
     const file = input.files?.[0] ?? null
+    resetVideoScrubber()
     selectedFile = file
-    preparedPayload = null
-    preparedIsStillImage = false
+    clearPreparedState()
+    clearAviPreview()
+    revokePreviewUrl()
+    previewUrl = null
     videoTrimStart = 0
     videoTrimEnd = 0
     videoDuration = 0
+    videoCacheSignature = ''
+
+    clearFrames(videoLiveFrames)
+    videoLiveFrames = []
+
     if (file) {
       log(`Selected video: ${file.name} (${formatBytes(file.size)})`)
-      revokePreviewUrl()
-      previewUrl = URL.createObjectURL(file)
       const v = document.createElement('video')
       v.preload = 'metadata'
-      v.onloadedmetadata = () => {
-        videoDuration = v.duration
-        videoTrimEnd = v.duration
-        URL.revokeObjectURL(v.src)
-      }
-      v.src = URL.createObjectURL(file)
+      await new Promise<void>((resolve, reject) => {
+        v.onloadedmetadata = () => {
+          videoDuration = v.duration
+          videoTrimEnd = Math.min(v.duration, 10)
+          URL.revokeObjectURL(v.src)
+          resolve()
+        }
+        v.onerror = () => reject(new Error('Failed to read video metadata'))
+        v.src = URL.createObjectURL(file)
+      })
+      await prepareVideoLiveFrames()
     }
   }
 
   function selectPattern(pat: PatternDef): void {
     selectedPattern = pat
-    preparedPayload = null
-    preparedIsStillImage = false
-    aviPlayer?.stop()
+    clearPreparedState()
+    clearAviPreview()
   }
 
   function switchMode(mode: UploadMode): void {
     uploadMode = mode
-    aviPlayer?.stop()
+    if (mode === 'qr') qrAutoSignature = ''
+    clearAviPreview()
+    clearPreparedState()
+    revokePreviewUrl()
+    previewUrl = null
+    if (mode !== 'video') {
+      isVideoScrubbing = false
+    }
   }
+
+  function getTransform(mode: UploadMode): TransformSettings {
+    if (mode === 'image') return {
+      scale: imageScale,
+      panX: imagePanX,
+      panY: imagePanY,
+      backdropColor: imageBackdropColor,
+    }
+    if (mode === 'images') return { scale: sequenceScale, panX: sequencePanX, panY: sequencePanY }
+    if (mode === 'video') return { scale: videoScale, panX: videoPanX, panY: videoPanY }
+    return { scale: 1, panX: 0, panY: 0 }
+  }
+
+  $effect(() => {
+    if (!selectedFile || videoDuration <= 0) return
+    if (uploadMode !== 'video') return
+
+    const signature = [
+      selectedFile.name,
+      selectedFile.size,
+      selectedFile.lastModified,
+      videoTrimStart.toFixed(2),
+      videoTrimEnd.toFixed(2),
+      videoFps,
+    ].join('|')
+
+    if (signature === videoCacheSignature) return
+    const timeout = setTimeout(() => {
+      videoCacheSignature = signature
+      prepareVideoLiveFrames().catch((err) => log(`Video cache failed: ${(err as Error).message}`))
+    }, 260)
+
+    return () => clearTimeout(timeout)
+  })
+
+  $effect(() => {
+    if (uploadMode !== 'qr' || isWriting || isGeneratingQr) return
+    const targetUrl = qrUrl.trim()
+    if (!targetUrl) return
+
+    const signature = [
+      targetUrl,
+      qrDarkColor,
+      qrLightColor,
+      qrDotStyle,
+      qrEdgeStyle,
+      qrZoom.toFixed(3),
+      qrRotation.toFixed(1),
+    ].join('|')
+    if (signature === qrAutoSignature) return
+
+    const timeout = setTimeout(() => {
+      qrAutoSignature = signature
+      generateQr()
+    }, 120)
+
+    return () => clearTimeout(timeout)
+  })
+
+  $effect(() => {
+    return () => {
+      resetVideoScrubber()
+    }
+  })
+
+  $effect(() => {
+    if (isWriting || isGeneratingPreview || uploadMode === 'pattern' || uploadMode === 'qr') return
+
+    if (uploadMode === 'image' && imagePreviewMode === 'preview' && imageLiveFrames.length > 0 && selectedFile) {
+      const signature = [
+        'image',
+        selectedFile.name,
+        selectedFile.size,
+        selectedFile.lastModified,
+        imageScale.toFixed(3),
+        imagePanX.toFixed(3),
+        imagePanY.toFixed(3),
+      ].join('|')
+      if (signature === autoPreviewSignature) return
+      const timeout = setTimeout(() => {
+        autoPreviewSignature = signature
+        generatePreview()
+      }, 120)
+      return () => clearTimeout(timeout)
+    }
+
+    if (uploadMode === 'images' && sequencePreviewMode === 'preview' && sequenceLiveFrames.length > 0) {
+      const filesSig = selectedFiles.map((f) => `${f.name}:${f.size}:${f.lastModified}`).join(',')
+      const signature = [
+        'images',
+        filesSig,
+        sequenceFps,
+        sequenceScale.toFixed(3),
+        sequencePanX.toFixed(3),
+        sequencePanY.toFixed(3),
+      ].join('|')
+      if (signature === autoPreviewSignature) return
+      const timeout = setTimeout(() => {
+        autoPreviewSignature = signature
+        generatePreview()
+      }, 180)
+      return () => clearTimeout(timeout)
+    }
+
+    if (uploadMode === 'video' && videoPreviewMode === 'preview' && videoLiveFrames.length > 0 && selectedFile) {
+      const signature = [
+        'video',
+        selectedFile.name,
+        selectedFile.size,
+        selectedFile.lastModified,
+        videoTrimStart.toFixed(2),
+        videoTrimEnd.toFixed(2),
+        videoFps,
+        videoScale.toFixed(3),
+        videoPanX.toFixed(3),
+        videoPanY.toFixed(3),
+      ].join('|')
+      if (signature === autoPreviewSignature) return
+      const timeout = setTimeout(() => {
+        autoPreviewSignature = signature
+        generatePreview()
+      }, 220)
+      return () => clearTimeout(timeout)
+    }
+  })
 
   // ─── Pattern still-image generation ───
 
@@ -188,10 +597,8 @@
     if (!selectedPattern) return
     isGeneratingPattern = true
     isGeneratingPreview = true
-    preparedPayload = null
-    aviPlayer?.stop()
-    aviPreviewFrames.forEach(f => f.close())
-    aviPreviewFrames = []
+    clearPreparedState()
+    clearAviPreview()
 
     try {
       // Generate a handful of frames and pick one from the middle for a representative still
@@ -207,7 +614,7 @@
 
       // Show as preview image
       revokePreviewUrl()
-      previewUrl = URL.createObjectURL(new Blob([stillJpeg], { type: 'image/jpeg' }))
+      previewUrl = URL.createObjectURL(makeBlob(stillJpeg, 'image/jpeg'))
       log(`Still ready: ${selectedPattern.name} (frame ${pickIdx + 1}/${sampleFrames}), ${formatBytes(stillJpeg.length)}`)
     } catch (err) {
       log(`Still generation failed: ${(err as Error).message}`)
@@ -217,30 +624,194 @@
     }
   }
 
+  function hashString(input: string): number {
+    let hash = 2166136261
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i)
+      hash = Math.imul(hash, 16777619)
+    }
+    return hash >>> 0
+  }
+
+  function createRng(seed: number): () => number {
+    let t = seed >>> 0
+    return () => {
+      t += 0x6D2B79F5
+      let r = Math.imul(t ^ (t >>> 15), t | 1)
+      r ^= r + Math.imul(r ^ (r >>> 7), r | 61)
+      return ((r ^ (r >>> 14)) >>> 0) / 4294967296
+    }
+  }
+
+  function drawStyledCell(
+    ctx: OffscreenCanvasRenderingContext2D,
+    x: number,
+    y: number,
+    size: number,
+    style: QrCellStyle,
+    color: string,
+  ): void {
+    ctx.fillStyle = color
+    if (style === 'square') {
+      ctx.fillRect(x, y, size, size)
+      return
+    }
+    if (style === 'round') {
+      const r = size / 2
+      ctx.beginPath()
+      ctx.arc(x + r, y + r, r, 0, Math.PI * 2)
+      ctx.fill()
+      return
+    }
+
+    const radius = size * 0.32
+    ctx.beginPath()
+    ctx.moveTo(x + radius, y)
+    ctx.lineTo(x + size - radius, y)
+    ctx.quadraticCurveTo(x + size, y, x + size, y + radius)
+    ctx.lineTo(x + size, y + size - radius)
+    ctx.quadraticCurveTo(x + size, y + size, x + size - radius, y + size)
+    ctx.lineTo(x + radius, y + size)
+    ctx.quadraticCurveTo(x, y + size, x, y + size - radius)
+    ctx.lineTo(x, y + radius)
+    ctx.quadraticCurveTo(x, y, x + radius, y)
+    ctx.closePath()
+    ctx.fill()
+  }
+
+  async function generateQrJpegBytes(): Promise<Uint8Array> {
+    const targetUrl = qrUrl.trim()
+    if (!targetUrl) throw new Error('Enter a URL for QR generation.')
+
+    const qr = QRCode.create(targetUrl, { errorCorrectionLevel: 'M' })
+    const moduleCount = qr.modules.size
+    const canvasSize = 368
+    const canvas = new OffscreenCanvas(canvasSize, canvasSize)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Could not create QR canvas context.')
+
+    const qrCanvasBg = '#d8dbe4'
+    ctx.fillStyle = qrCanvasBg
+    ctx.fillRect(0, 0, canvasSize, canvasSize)
+
+    const motif = 332
+    const quietModules = 2
+    const outerBandModules = 10
+    const totalGridModules = moduleCount + (quietModules + outerBandModules) * 2
+    const modulePx = Math.max(1, Math.floor(motif / totalGridModules))
+    const gridPx = modulePx * totalGridModules
+    const qrPx = moduleCount * modulePx
+    const quietPx = quietModules * modulePx
+
+    const seed = hashString([
+      targetUrl,
+      qrDarkColor,
+      qrLightColor,
+      qrDotStyle,
+      qrEdgeStyle,
+      qrZoom.toFixed(3),
+      qrRotation.toFixed(1),
+    ].join('|'))
+    const rng = createRng(seed)
+
+    ctx.save()
+    ctx.translate(canvasSize / 2, canvasSize / 2)
+    ctx.rotate((qrRotation * Math.PI) / 180)
+    ctx.scale(qrZoom, qrZoom)
+
+    // Center the integer-sized grid so module pitch is exact and derived from QR data.
+    const gridOffset = -gridPx / 2
+
+    const coreWithQuietModules = moduleCount + quietModules * 2
+    const innerHalf = (coreWithQuietModules * modulePx) / 2
+    const cellSize = modulePx * 0.9
+    const cellInset = (modulePx - cellSize) / 2
+
+    const center = totalGridModules / 2
+    const outerStart = 0
+    const outerEndExclusive = totalGridModules
+    const coreStart = outerBandModules
+    const coreEndExclusive = totalGridModules - outerBandModules
+    const qrStart = outerBandModules + quietModules
+
+    for (let row = outerStart; row < outerEndExclusive; row++) {
+      for (let col = outerStart; col < outerEndExclusive; col++) {
+        const inCore = row >= coreStart && row < coreEndExclusive && col >= coreStart && col < coreEndExclusive
+        if (inCore) continue
+
+        const x = gridOffset + col * modulePx
+        const y = gridOffset + row * modulePx
+        const color = rng() > 0.5 ? qrDarkColor : qrLightColor
+        drawStyledCell(ctx, x + cellInset, y + cellInset, cellSize, qrEdgeStyle, color)
+      }
+    }
+
+    for (let row = 0; row < moduleCount; row++) {
+      for (let col = 0; col < moduleCount; col++) {
+        const isDark = qr.modules.get(row, col)
+        const x = gridOffset + (qrStart + col) * modulePx
+        const y = gridOffset + (qrStart + row) * modulePx
+        const color = isDark ? qrDarkColor : qrLightColor
+        drawStyledCell(ctx, x + cellInset, y + cellInset, cellSize, qrDotStyle, color)
+      }
+    }
+
+    ctx.restore()
+
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.92 })
+    return new Uint8Array(await blob.arrayBuffer())
+  }
+
+  async function generateQr(): Promise<void> {
+    isGeneratingQr = true
+    clearPreparedState()
+    clearAviPreview()
+    try {
+      const jpeg = await generateQrJpegBytes()
+      preparedPayload = jpeg
+      preparedIsStillImage = true
+      preparedPayloadLabel = `QR image — ${formatBytes(jpeg.length)}`
+      revokePreviewUrl()
+      previewUrl = URL.createObjectURL(makeBlob(jpeg, 'image/jpeg'))
+      log(`QR ready: ${formatBytes(jpeg.length)}`)
+    } catch (err) {
+      log(`QR generation failed: ${(err as Error).message}`)
+    } finally {
+      isGeneratingQr = false
+    }
+  }
+
   // ─── Preview generation ───
 
   async function generatePreview(): Promise<void> {
     isGeneratingPreview = true
-    preparedPayload = null
-    preparedIsStillImage = false
-    aviPlayer?.stop()
-    aviPreviewFrames.forEach(f => f.close())
-    aviPreviewFrames = []
+    clearPreparedState()
+    clearAviPreview()
+    revokePreviewUrl()
+    previewUrl = null
 
     try {
       let avi: Uint8Array
       let label: string
 
+      if (uploadMode === 'image') {
+        if (imageLiveFrames.length === 0) throw new Error('No image selected')
+        const imageJpeg = await previewBitmapToJpeg(imageLiveFrames[0], getTransform('image'))
+        preparedPayload = imageJpeg
+        preparedIsStillImage = true
+        preparedPayloadLabel = `Image preview — ${formatBytes(imageJpeg.length)}`
+        previewUrl = URL.createObjectURL(makeBlob(imageJpeg, 'image/jpeg'))
+        log(`Image preview ready: ${formatBytes(imageJpeg.length)}`)
+        return
+      }
+
       if (uploadMode === 'images') {
-        if (selectedFiles.length === 0) throw new Error('No images selected')
-        avi = await imagesToAvi(selectedFiles, sequenceFps, log)
-        label = `${selectedFiles.length} images @ ${sequenceFps}fps`
+        if (sequenceLiveFrames.length === 0) throw new Error('No images selected')
+        avi = await previewBitmapsToAvi(sequenceLiveFrames, sequenceFps, getTransform('images'), log)
+        label = `${sequenceLiveFrames.length} cached images @ ${sequenceFps}fps`
       } else if (uploadMode === 'video') {
-        if (!selectedFile) throw new Error('No video selected')
-        avi = await videoToAvi(selectedFile, {
-          fps: videoFps, trimStart: videoTrimStart, trimEnd: videoTrimEnd,
-          zoom: videoZoom, zoomCx: videoZoomX, zoomCy: videoZoomY,
-        }, log)
+        if (videoLiveFrames.length === 0) throw new Error('No video selected')
+        avi = await previewBitmapsToAvi(videoLiveFrames, videoFps, getTransform('video'), log)
         label = `Video ${videoTrimStart.toFixed(1)}s–${videoTrimEnd.toFixed(1)}s @ ${videoFps}fps`
       } else if (uploadMode === 'pattern') {
         if (!selectedPattern) throw new Error('No pattern selected')
@@ -277,36 +848,56 @@
 
   async function getUploadBytes(): Promise<Uint8Array> {
     if (preparedPayload) {
-      // If this is a pattern-generated still, override uploadMode so the device gets .jpg not .avi
-      if (preparedIsStillImage) uploadMode = 'image'
       log(`Using prepared payload: ${formatBytes(preparedPayload.length)}`)
       return preparedPayload
     }
 
     if (uploadMode === 'image') {
-      if (!selectedFile) throw new Error('No file selected.')
-      if (selectedFile.type.startsWith('image/')) {
-        return imageFileTo368JpegBytes(selectedFile)
-      }
-      return new Uint8Array(await selectedFile.arrayBuffer())
+      if (imageLiveFrames.length === 0) throw new Error('No image selected.')
+      return previewBitmapToJpeg(imageLiveFrames[0], getTransform('image'))
     }
     if (uploadMode === 'images') {
-      if (selectedFiles.length === 0) throw new Error('No images selected for sequence.')
-      return imagesToAvi(selectedFiles, sequenceFps, log)
+      if (sequenceLiveFrames.length === 0) throw new Error('No sequence selected.')
+      return previewBitmapsToAvi(sequenceLiveFrames, sequenceFps, getTransform('images'), log)
     }
     if (uploadMode === 'video') {
-      if (!selectedFile) throw new Error('No video file selected.')
-      return videoToAvi(selectedFile, {
-        fps: videoFps, trimStart: videoTrimStart, trimEnd: videoTrimEnd,
-        zoom: videoZoom, zoomCx: videoZoomX, zoomCy: videoZoomY,
-      }, log)
+      if (videoLiveFrames.length === 0) throw new Error('No video frames cached.')
+      return previewBitmapsToAvi(videoLiveFrames, videoFps, getTransform('video'), log)
     }
     if (uploadMode === 'pattern') {
       if (!selectedPattern) throw new Error('No pattern selected.')
       const patternFrames = await selectedPattern.generate({ frames: patternFrameCount, fps: patternFps })
       return buildMjpgAvi(patternFrames, { fps: patternFps })
     }
+    if (uploadMode === 'qr') {
+      return generateQrJpegBytes()
+    }
     throw new Error(`Unknown upload mode: ${uploadMode}`)
+  }
+
+  function resolveUploadModeForDevice(): UploadMode {
+    if (uploadMode === 'qr') return 'image'
+    if (preparedIsStillImage) return 'image'
+    return uploadMode
+  }
+
+  async function downloadGenerated(): Promise<void> {
+    try {
+      const payload = await getUploadBytes()
+      const deviceMode = resolveUploadModeForDevice()
+      const ext = deviceMode === 'image' ? 'jpg' : 'avi'
+      const mime = deviceMode === 'image' ? 'image/jpeg' : 'video/x-msvideo'
+      const blob = makeBlob(payload, mime)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `badge-${uploadMode}-${Date.now()}.${ext}`
+      link.click()
+      URL.revokeObjectURL(url)
+      log(`Downloaded generated ${ext.toUpperCase()} (${formatBytes(payload.length)})`)
+    } catch (err) {
+      log(`Download failed: ${(err as Error).message}`)
+    }
   }
 
   // ─── Upload orchestration ───
@@ -332,6 +923,10 @@
       status = 'Select a pattern.'
       return
     }
+    if (uploadMode === 'qr' && !qrUrl.trim()) {
+      status = 'Enter a URL for QR mode.'
+      return
+    }
 
     isWriting = true
     cancelRequested = false
@@ -344,14 +939,15 @@
     try {
       aviPlayer?.stop()
       const payload = await getUploadBytes()
+      const uploadModeForDevice = resolveUploadModeForDevice()
 
       if (payload.length > MAX_UPLOAD_BYTES) {
         throw new Error(`File too large: ${formatBytes(payload.length)} exceeds ${formatBytes(MAX_UPLOAD_BYTES)} limit.`)
       }
 
-      if (uploadMode === 'image') {
+      if (uploadModeForDevice === 'image') {
         revokePreviewUrl()
-        previewUrl = URL.createObjectURL(new Blob([payload], { type: 'image/jpeg' }))
+        previewUrl = URL.createObjectURL(makeBlob(payload, 'image/jpeg'))
       }
 
       uploadStartTime = Date.now()
@@ -360,7 +956,7 @@
       await writeFileE87({
         conn: conn!,
         payload,
-        uploadMode,
+        uploadMode: uploadModeForDevice,
         interChunkDelayMs,
         cancelRequested: () => cancelRequested,
         onProgress: (bytesSent, totalBytes, chunksSent, totalChunks) => {
@@ -424,7 +1020,24 @@
       <button class:active={uploadMode === 'video'} onclick={() => switchMode('video')} disabled={isWriting}>
         🎬 Video
       </button>
+      <button class:active={uploadMode === 'qr'} onclick={() => switchMode('qr')} disabled={isWriting}>
+        🔳 QR
+      </button>
     </div>
+
+    {#if uploadMode === 'image'}
+      <div class="row buttons" style="margin-bottom:0.5rem">
+        <PreviewModeSwitch bind:mode={imagePreviewMode} disabled={isWriting || isGeneratingPreview} />
+      </div>
+    {:else if uploadMode === 'images'}
+      <div class="row buttons" style="margin-bottom:0.5rem">
+        <PreviewModeSwitch bind:mode={sequencePreviewMode} disabled={isWriting || isGeneratingPreview} />
+      </div>
+    {:else if uploadMode === 'video'}
+      <div class="row buttons" style="margin-bottom:0.5rem">
+        <PreviewModeSwitch bind:mode={videoPreviewMode} disabled={isWriting || isGeneratingPreview} />
+      </div>
+    {/if}
 
     <!-- Mode-specific content -->
     {#if uploadMode === 'pattern'}
@@ -442,38 +1055,117 @@
     {:else if uploadMode === 'image'}
       <ImageMode
         {isWriting}
-        {previewUrl}
+        {selectedFile}
+        bind:backdropColor={imageBackdropColor}
         onSelectFile={setFile}
       />
+
+      {#if imagePreviewMode === 'live' && imageLiveFrames.length > 0}
+        <LiveTransformCanvas
+          frames={imageLiveFrames}
+          fps={1}
+          backdropColor={imageBackdropColor}
+          bind:scale={imageScale}
+          bind:panX={imagePanX}
+          bind:panY={imagePanY}
+        />
+      {:else if imagePreviewMode === 'preview' && previewUrl}
+        <div style="text-align:center;margin:0.5rem 0">
+          <img src={previewUrl} alt="Preview" style="max-width:220px;max-height:220px;border:1px solid #334;border-radius:50%;aspect-ratio:1" />
+        </div>
+      {/if}
+
+      {#if imagePreviewMode === 'preview' && selectedFile}
+        <div class="row buttons" style="margin-top:0.4rem">
+          <button onclick={generatePreview} disabled={isWriting || isGeneratingPreview}>
+            {isGeneratingPreview ? 'Generating…' : 'Generate Preview Image'}
+          </button>
+        </div>
+      {/if}
     {:else if uploadMode === 'images'}
       <SequenceMode
         {isWriting}
-        {isGeneratingPreview}
         {selectedFiles}
         bind:sequenceFps
         onSelectFiles={setMultipleFiles}
-        onGeneratePreview={generatePreview}
       />
+
+      {#if sequencePreviewMode === 'live' && sequenceLiveFrames.length > 0}
+        <LiveTransformCanvas
+          frames={sequenceLiveFrames}
+          fps={sequenceFps}
+          bind:scale={sequenceScale}
+          bind:panX={sequencePanX}
+          bind:panY={sequencePanY}
+        />
+      {:else if sequencePreviewMode === 'preview'}
+        <div class="row buttons" style="margin-top:0.4rem">
+          <button onclick={generatePreview} disabled={isWriting || isGeneratingPreview || selectedFiles.length === 0}>
+            {isGeneratingPreview ? 'Generating…' : 'Generate AVI Preview'}
+          </button>
+        </div>
+      {/if}
     {:else if uploadMode === 'video'}
       <VideoMode
         {isWriting}
-        {isGeneratingPreview}
         {selectedFile}
-        {previewUrl}
         bind:videoFps
         bind:videoTrimStart
         bind:videoTrimEnd
         {videoDuration}
-        bind:videoZoom
-        bind:videoZoomX
-        bind:videoZoomY
         onSelectVideo={setVideoFile}
-        onGeneratePreview={generatePreview}
+        onScrubStart={onVideoScrubStart}
+        onScrubFrame={onVideoScrubFrame}
+        onScrubEnd={onVideoScrubEnd}
       />
+
+      {#if videoScrubFrame && isVideoScrubbing}
+        <LiveTransformCanvas
+          frames={[videoScrubFrame]}
+          fps={videoFps}
+          bind:scale={videoScale}
+          bind:panX={videoPanX}
+          bind:panY={videoPanY}
+        />
+      {:else if videoPreviewMode === 'live' && videoLiveFrames.length > 0}
+        <LiveTransformCanvas
+          frames={videoLiveFrames}
+          fps={videoFps}
+          bind:scale={videoScale}
+          bind:panX={videoPanX}
+          bind:panY={videoPanY}
+        />
+      {:else if videoPreviewMode === 'preview'}
+        <div class="row buttons" style="margin-top:0.4rem">
+          <button onclick={generatePreview} disabled={isWriting || isGeneratingPreview || !selectedFile}>
+            {isGeneratingPreview ? 'Generating…' : 'Generate AVI Preview'}
+          </button>
+        </div>
+      {/if}
+    {:else if uploadMode === 'qr'}
+      <QrMode
+        {isWriting}
+        bind:qrUrl
+        bind:qrDarkColor
+        bind:qrLightColor
+        bind:qrDotStyle
+        bind:qrEdgeStyle
+        bind:qrZoom
+        bind:qrRotation
+      />
+      {#if previewUrl}
+        <div style="text-align:center;margin:0.5rem 0">
+          <img src={previewUrl} alt="QR preview" style="max-width:220px;max-height:220px;border:1px solid #334;border-radius:50%;aspect-ratio:1" />
+        </div>
+      {/if}
     {/if}
 
     <!-- Shared AVI preview player -->
-    {#if aviPreviewFrames.length > 0 && uploadMode !== 'image'}
+    {#if aviPreviewFrames.length > 0 && (
+      uploadMode === 'pattern'
+      || (uploadMode === 'images' && sequencePreviewMode === 'preview')
+      || (uploadMode === 'video' && videoPreviewMode === 'preview' && !isVideoScrubbing)
+    )}
       <AviPlayer
         bind:this={aviPlayer}
         frames={aviPreviewFrames}
@@ -489,8 +1181,7 @@
       {/if}
     {/if}
 
-    <!-- Pattern still preview -->
-    {#if uploadMode === 'pattern' && previewUrl && preparedPayload && aviPreviewFrames.length === 0}
+    {#if previewUrl && preparedPayload && aviPreviewFrames.length === 0 && uploadMode === 'pattern'}
       <div style="text-align:center;margin:0.5rem 0">
         <img src={previewUrl} alt="Pattern still" style="max-width:200px;max-height:200px;border:1px solid #334;border-radius:50%;aspect-ratio:1" />
       </div>
@@ -515,6 +1206,9 @@
     <div class="row buttons" style="margin-top:0.5rem">
       <button onclick={startUpload} disabled={!conn || isWriting}>
         {isWriting ? 'Uploading…' : 'Upload'}
+      </button>
+      <button onclick={downloadGenerated} disabled={isWriting}>
+        Download Generated
       </button>
     </div>
 
@@ -573,7 +1267,7 @@
   .settings { display: flex; gap: 0.8rem; margin: 0.6rem 0; flex-wrap: wrap; align-items: flex-end; }
   .settings label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.88rem; }
   .settings label span { color: #b0cce8; }
-  input, button, select, textarea {
+  input, button {
     border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.16);
     background: rgba(255, 255, 255, 0.07);
@@ -581,18 +1275,11 @@
     padding: 0.5rem 0.7rem;
     font-size: 0.9rem;
   }
-  select, textarea { width: 100%; }
-  textarea {
-    margin-top: 0.5rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    line-height: 1.3;
-  }
   input[type="number"] { width: 90px; max-width: 100%; }
   button { cursor: pointer; font-weight: 600; }
   button:hover:not(:disabled) { border-color: rgba(129, 178, 255, 0.9); }
   button:disabled { opacity: 0.45; cursor: not-allowed; }
   button.secondary { background: rgba(255, 100, 100, 0.12); }
-  button.danger { background: rgba(255, 70, 70, 0.18); border-color: rgba(255, 130, 130, 0.45); }
   button.active {
     border-color: rgba(129, 178, 255, 0.9);
     background: rgba(129, 178, 255, 0.14);

@@ -12,6 +12,69 @@ export const E87_IMAGE_WIDTH = 368
 export const E87_IMAGE_HEIGHT = 368
 export const E87_TARGET_IMAGE_BYTES = 16000
 export const MAX_UPLOAD_BYTES = 2_000_000
+export const LIVE_PREVIEW_SIZE = 512
+
+export interface TransformSettings {
+  scale: number
+  panX: number
+  panY: number
+  backdropColor?: string
+}
+
+const DEFAULT_TRANSFORM: TransformSettings = {
+  scale: 1,
+  panX: 0,
+  panY: 0,
+}
+
+function cropToSquare(bitmap: ImageBitmap): { sx: number, sy: number, sw: number, sh: number } {
+  const srcRatio = bitmap.width / bitmap.height
+  const targetRatio = 1
+  let sx = 0
+  let sy = 0
+  let sw = bitmap.width
+  let sh = bitmap.height
+  if (srcRatio > targetRatio) {
+    sw = Math.round(bitmap.height * targetRatio)
+    sx = Math.floor((bitmap.width - sw) / 2)
+  } else {
+    sh = Math.round(bitmap.width / targetRatio)
+    sy = Math.floor((bitmap.height - sh) / 2)
+  }
+  return { sx, sy, sw, sh }
+}
+
+function renderTransformedFrame(
+  ctx: OffscreenCanvasRenderingContext2D,
+  source: CanvasImageSource,
+  width: number,
+  height: number,
+  transform: TransformSettings,
+): void {
+  const { scale, panX, panY } = transform
+  const drawW = width * scale
+  const drawH = height * scale
+  const dx = (width - drawW) / 2 + panX * (width / 2)
+  const dy = (height - drawH) / 2 + panY * (height / 2)
+
+  ctx.fillStyle = transform.backdropColor ?? 'black'
+  ctx.fillRect(0, 0, width, height)
+  ctx.drawImage(source, dx, dy, drawW, drawH)
+}
+
+async function squareBitmapToJpeg(
+  bitmap: ImageBitmap,
+  transform: TransformSettings,
+  quality = 0.88,
+): Promise<Uint8Array> {
+  const canvas = new OffscreenCanvas(E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Could not create 2D canvas context.')
+
+  renderTransformedFrame(ctx, bitmap, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT, transform)
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
+  return new Uint8Array(await blob.arrayBuffer())
+}
 
 /**
  * Convert a single image file to 368×368 JPEG, bracketing quality
@@ -66,6 +129,50 @@ export async function imageFileTo368JpegBytes(file: File): Promise<Uint8Array> {
   return new Uint8Array(await blob.arrayBuffer())
 }
 
+export async function imageFileToPreviewBitmap(file: File, size = LIVE_PREVIEW_SIZE): Promise<ImageBitmap> {
+  const bitmap = await createImageBitmap(file)
+  const { sx, sy, sw, sh } = cropToSquare(bitmap)
+  const canvas = new OffscreenCanvas(size, size)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Could not create 2D canvas context.')
+  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, size, size)
+  bitmap.close()
+  return createImageBitmap(canvas)
+}
+
+export async function imagesToPreviewBitmaps(files: File[], size = LIVE_PREVIEW_SIZE): Promise<ImageBitmap[]> {
+  const out: ImageBitmap[] = []
+  for (const file of files) {
+    out.push(await imageFileToPreviewBitmap(file, size))
+  }
+  return out
+}
+
+export async function previewBitmapToJpeg(
+  bitmap: ImageBitmap,
+  transform: TransformSettings = DEFAULT_TRANSFORM,
+): Promise<Uint8Array> {
+  return squareBitmapToJpeg(bitmap, transform, 0.88)
+}
+
+export async function previewBitmapsToAvi(
+  bitmaps: ImageBitmap[],
+  fps: number,
+  transform: TransformSettings = DEFAULT_TRANSFORM,
+  log?: (msg: string) => void,
+): Promise<Uint8Array> {
+  if (bitmaps.length === 0) throw new Error('No frames to encode.')
+  log?.(`Encoding ${bitmaps.length} cached frames to AVI...`)
+  const frames: Uint8Array[] = []
+  for (let i = 0; i < bitmaps.length; i++) {
+    frames.push(await squareBitmapToJpeg(bitmaps[i], transform, 0.88))
+    if ((i + 1) % 25 === 0) log?.(`  Encoded ${i + 1}/${bitmaps.length} frames...`)
+  }
+  const avi = buildMjpgAvi(frames, { fps })
+  log?.(`AVI built from cache: ${formatBytes(avi.length)}`)
+  return avi
+}
+
 /**
  * Convert a single image file to a 368×368 JPEG frame at fixed quality.
  * Used for multi-frame AVI building.
@@ -118,6 +225,80 @@ export interface VideoToAviOptions {
   zoom: number
   zoomCx: number
   zoomCy: number
+}
+
+export interface VideoToPreviewFramesOptions {
+  fps: number
+  trimStart: number
+  trimEnd: number
+  maxFrames?: number
+  previewSize?: number
+}
+
+export async function videoToPreviewBitmaps(
+  file: File,
+  opts: VideoToPreviewFramesOptions,
+  log?: (msg: string) => void,
+): Promise<ImageBitmap[]> {
+  const {
+    fps,
+    trimStart,
+    trimEnd,
+    maxFrames,
+    previewSize = LIVE_PREVIEW_SIZE,
+  } = opts
+
+  const url = URL.createObjectURL(file)
+  const video = document.createElement('video')
+  video.muted = true
+  video.playsInline = true
+  video.preload = 'auto'
+
+  await new Promise<void>((resolve, reject) => {
+    video.onloadedmetadata = () => resolve()
+    video.onerror = () => reject(new Error('Failed to load video'))
+    video.src = url
+  })
+
+  const start = Math.max(0, trimStart)
+  const end = Math.max(start, trimEnd)
+  const duration = Math.max(0, end - start)
+  const requestedFps = Math.max(1, fps)
+  const expectedFrames = Math.ceil(duration * requestedFps)
+  const targetFrames = Math.max(1, maxFrames ? Math.min(expectedFrames, maxFrames) : expectedFrames)
+  const step = targetFrames <= 1 ? 0 : duration / (targetFrames - 1)
+  log?.(`Extracting ${targetFrames} cached preview frames at ${requestedFps}fps...`)
+
+  const canvas = new OffscreenCanvas(previewSize, previewSize)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Could not create 2D canvas context.')
+
+  const srcFullW = video.videoWidth
+  const srcFullH = video.videoHeight
+  const minDim = Math.min(srcFullW, srcFullH)
+  const cropX = (srcFullW - minDim) / 2
+  const cropY = (srcFullH - minDim) / 2
+
+  const frames: ImageBitmap[] = []
+  const progressStep = Math.max(1, Math.floor(targetFrames / 20))
+  for (let i = 0; i < targetFrames; i++) {
+    const t = Math.min(end, start + i * step)
+    video.currentTime = t
+    await new Promise<void>((r) => { video.onseeked = () => r() })
+
+    ctx.fillStyle = 'black'
+    ctx.fillRect(0, 0, previewSize, previewSize)
+    ctx.drawImage(video, cropX, cropY, minDim, minDim, 0, 0, previewSize, previewSize)
+    frames.push(await createImageBitmap(canvas))
+
+    if ((i + 1) % progressStep === 0 || i + 1 === targetFrames) {
+      const percent = Math.round(((i + 1) / targetFrames) * 100)
+      log?.(`  Cached ${i + 1}/${targetFrames} frames (${percent}%)...`)
+    }
+  }
+
+  URL.revokeObjectURL(url)
+  return frames
 }
 
 /**

@@ -5,40 +5,15 @@
 
   interface Props {
     isWriting: boolean
-    isGeneratingPreview: boolean
     selectedFiles: File[]
     sequenceFps: number
     onSelectFiles: (event: Event) => void
-    onGeneratePreview: () => void
   }
 
   let {
-    isWriting, isGeneratingPreview, selectedFiles,
-    sequenceFps = $bindable(), onSelectFiles, onGeneratePreview,
+    isWriting, selectedFiles,
+    sequenceFps = $bindable(), onSelectFiles,
   }: Props = $props()
-
-  let lastAutoPreviewSignature = $state('')
-
-  const AUTO_PREVIEW_DEBOUNCE_MS = 250
-
-  $effect(() => {
-    if (selectedFiles.length === 0) return
-    if (isWriting || isGeneratingPreview) return
-
-    const filesSignature = selectedFiles
-      .map((f) => `${f.name}:${f.size}:${f.lastModified}`)
-      .join(',')
-    const signature = `${filesSignature}|fps:${sequenceFps}`
-
-    if (signature === lastAutoPreviewSignature) return
-
-    const timeout = setTimeout(() => {
-      lastAutoPreviewSignature = signature
-      onGeneratePreview()
-    }, AUTO_PREVIEW_DEBOUNCE_MS)
-
-    return () => clearTimeout(timeout)
-  })
 </script>
 
 <div class="image-source">
@@ -63,17 +38,7 @@
   {/if}
 </p>
 
-{#if selectedFiles.length > 0}
-  <div class="row buttons" style="margin-top:0.5rem">
-    <button onclick={onGeneratePreview} disabled={isWriting || isGeneratingPreview}>
-      {isGeneratingPreview ? 'Generating…' : '▶ Preview AVI'}
-    </button>
-  </div>
-{/if}
-
 <style>
-  .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
-  .buttons { margin-bottom: 0.6rem; }
   .dim { font-weight: 400; color: #7a9dc5; }
   .settings { display: flex; gap: 0.8rem; margin: 0.6rem 0; flex-wrap: wrap; align-items: flex-end; }
   .settings label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.88rem; }

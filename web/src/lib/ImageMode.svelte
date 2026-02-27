@@ -5,11 +5,12 @@
 
   interface Props {
     isWriting: boolean
-    previewUrl: string | null
+    selectedFile: File | null
+    backdropColor: string
     onSelectFile: (event: Event) => void
   }
 
-  let { isWriting, previewUrl, onSelectFile }: Props = $props()
+  let { isWriting, selectedFile, backdropColor = $bindable(), onSelectFile }: Props = $props()
 </script>
 
 <div class="image-source">
@@ -18,19 +19,26 @@
       Choose image…
       <input type="file" accept="image/*" onchange={onSelectFile} disabled={isWriting} style="display:none" />
     </label>
+    {#if selectedFile}
+      <span class="dim">{selectedFile.name}</span>
+    {/if}
   </div>
 </div>
-{#if previewUrl}
-  <div class="preview">
-    <img src={previewUrl} alt="Preview" />
-  </div>
-{/if}
+
+<div class="settings">
+  <label>
+    <span>Backdrop color</span>
+    <input type="color" bind:value={backdropColor} disabled={isWriting} />
+  </label>
+</div>
 
 <style>
   .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
   .buttons { margin-bottom: 0.6rem; }
-  .preview { margin: 0.5rem 0; }
-  .preview img { max-width: 180px; max-height: 180px; border: 1px solid #334; border-radius: 6px; }
+  .dim { font-weight: 400; color: #7a9dc5; }
+  .settings { display: flex; gap: 0.8rem; margin: 0.6rem 0; flex-wrap: wrap; align-items: flex-end; }
+  .settings label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.88rem; }
+  .settings label span { color: #b0cce8; }
   .file-btn {
     display: inline-flex; align-items: center;
     border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.16);

@@ -46,7 +46,7 @@ export type E87Frame = {
   body: Uint8Array
 }
 
-export type UploadMode = 'image' | 'images' | 'video' | 'pattern'
+export type UploadMode = 'image' | 'images' | 'video' | 'pattern' | 'qr'
 
 export type UploadProgressCallback = (
   bytesSent: number,
@@ -324,7 +324,7 @@ export async function connectE87(log?: (msg: string) => void): Promise<E87Connec
       // Ensure any stale connection from a previous attempt is fully torn down
       // before asking the OS to connect again.
       if (server) {
-        try { server.disconnect() } catch { /* ignore */ }
+        try { device.gatt?.disconnect() } catch { /* ignore */ }
         server = null
       }
 
@@ -339,7 +339,7 @@ export async function connectE87(log?: (msg: string) => void): Promise<E87Connec
       server = (await device.gatt?.connect()) ?? null
       if (!server) throw new Error('No GATT server available.')
 
-      try { server.addEventListener('gattserverdisconnected', onDisconnect) } catch { /* ignore */ }
+      try { device.addEventListener('gattserverdisconnected', onDisconnect) } catch { /* ignore */ }
 
       // ── Step 2: immediate service / characteristic discovery ──
       // If the Windows cached-mode bug strikes, this will throw because the
@@ -347,7 +347,7 @@ export async function connectE87(log?: (msg: string) => void): Promise<E87Connec
       // more reliable than checking server.connected after an arbitrary sleep.
       chars = await findCharacteristics(server, log)
 
-      try { server.removeEventListener('gattserverdisconnected', onDisconnect) } catch { /* ignore */ }
+      try { device.removeEventListener('gattserverdisconnected', onDisconnect) } catch { /* ignore */ }
 
       // Guard: the discovery call above may have "succeeded" on Windows by
       // returning stale cached data even though the radio link dropped.
@@ -450,7 +450,7 @@ export async function disconnectE87(conn: E87Connection, log?: (msg: string) => 
 function buildFilePathResponse(deviceSeq: number, uploadMode: UploadMode): Uint8Array {
   const now20 = new Date()
   const dateStr = `${now20.getFullYear()}${String(now20.getMonth() + 1).padStart(2, '0')}${String(now20.getDate()).padStart(2, '0')}${String(now20.getHours()).padStart(2, '0')}${String(now20.getMinutes()).padStart(2, '0')}${String(now20.getSeconds()).padStart(2, '0')}`
-  const ext = uploadMode === 'image' ? '.jpg' : '.avi'
+  const ext = (uploadMode === 'image' || uploadMode === 'qr') ? '.jpg' : '.avi'
   const devicePath = `\u555C${dateStr}${ext}`
   const pathUtf16 = new Uint8Array(devicePath.length * 2 + 2)
   for (let ci = 0; ci < devicePath.length; ci++) {
@@ -528,7 +528,7 @@ export async function writeFileE87(opts: UploadOptions): Promise<void> {
       const respBody = buildFilePathResponse(deviceSeq, uploadMode)
       const respFrame = buildE87Frame(0x00, 0x20, respBody)
       log(`AUTO-RESPOND cmd 0x20: seq=${deviceSeq}, sending path response (${respFrame.length} bytes)`)
-      characteristic.writeValueWithoutResponse(respFrame).then(() => {
+      characteristic.writeValueWithoutResponse(new Uint8Array(respFrame)).then(() => {
         log('cmd 0x20 auto-response sent successfully.')
       }).catch((err: unknown) => {
         log(`cmd 0x20 auto-response failed: ${(err as Error).message}`)
