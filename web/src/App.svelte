@@ -1244,41 +1244,41 @@
     width: 100%;
     max-width: 1024px;
     margin: 0 auto;
-    padding: 1rem;
+    padding: 0.85rem;
     box-sizing: border-box;
   }
-  h1 { margin: 0 0 0.25rem; font-size: 1.6rem; letter-spacing: -0.01em; }
-  .hint { margin: 0 0 0.8rem; color: #a3a3a3; font-size: 0.88rem; }
+  h1 { margin: 0 0 0.25rem; font-size: 1.5rem; letter-spacing: -0.01em; }
+  .hint { margin: 0 0 0.7rem; color: #a3a3a3; font-size: 0.82rem; }
   .panel {
     background: var(--neutral-900);
     border: 1px solid var(--neutral-800);
     box-shadow: none;
     border-radius: 2px;
-    padding: 1rem;
-    margin-bottom: 0.8rem;
+    padding: 0.75rem;
+    margin-bottom: 0.65rem;
   }
-  .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
-  .buttons { margin-bottom: 0.6rem; }
-  .mode-tabs { border-bottom: 1px solid var(--neutral-800); padding-bottom: 0.6rem; margin-bottom: 0.6rem; }
+  .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .buttons { margin-bottom: 0.5rem; }
+  .mode-tabs { border-bottom: 1px solid var(--neutral-800); padding-bottom: 0.5rem; margin-bottom: 0.5rem; }
   .status { font-weight: 600; color: #e9e9ec; margin-bottom: 0.15rem; }
   .dim { font-weight: 400; color: #a3a3a3; }
   .payload-info { font-size: 0.8rem; margin: 0.2rem 0; text-align: center; }
-  .settings { display: flex; gap: 0.8rem; margin: 0.6rem 0; flex-wrap: wrap; align-items: flex-end; }
+  .settings { display: flex; gap: 0.55rem; margin: 0.5rem 0; flex-wrap: wrap; align-items: flex-end; }
   .settings label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.88rem; }
   .settings label span {
     color: #d4d4d4;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
     text-transform: uppercase;
     letter-spacing: -0.08em;
-    font-size: 0.75rem;
+    font-size: 0.72rem;
   }
   input, button {
     border-radius: 2px;
     border: 1px solid var(--neutral-800);
     background: #000;
     color: #f5f5f5;
-    padding: 0.5rem 0.7rem;
-    font-size: 0.9rem;
+    padding: 0.52rem 0.62rem;
+    font-size: 0.82rem;
   }
   input[type="number"] { width: 90px; max-width: 100%; }
   button {
@@ -1286,7 +1286,7 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: -0.08em;
+    letter-spacing: -0.1em;
     color: var(--base);
     background: color-mix(in srgb, var(--base) 8%, transparent);
     border-color: color-mix(in srgb, var(--base) 36%, var(--neutral-800));
@@ -1327,7 +1327,7 @@
   /* ─── Mobile ─── */
   @media (max-width: 600px) {
     .app { padding: 0.5rem; }
-    h1 { font-size: 1.25rem; }
+    h1 { font-size: 1.2rem; }
     .panel { padding: 0.7rem; border-radius: 2px; }
     .row { gap: 0.4rem; }
     .settings { gap: 0.5rem; }

@@ -484,7 +484,21 @@ export interface UploadOptions {
 
 export async function writeFileE87(opts: UploadOptions): Promise<void> {
   const { conn, payload: jpegBytes, uploadMode, interChunkDelayMs, cancelRequested, onProgress, log } = opts
-  const { writeChar: characteristic, controlChar: controlCharacteristic, notificationQueue } = conn
+  const { writeChar: characteristic, controlChar: controlCharacteristic } = conn
+
+  const uploadNotificationQueue: Uint8Array[] = [...conn.notificationQueue]
+  const mirrorNotificationForUpload = (event: Event) => {
+    const target = event.target as BluetoothRemoteGATTCharacteristic
+    const value = target.value
+    if (!value) return
+    const raw = new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
+    uploadNotificationQueue.push(raw)
+    if (uploadNotificationQueue.length > 300) uploadNotificationQueue.shift()
+  }
+
+  for (const c of conn.notifyChars) {
+    c.addEventListener('characteristicvaluechanged', mirrorNotificationForUpload)
+  }
 
   const isJpeg = jpegBytes[0] === 0xff && jpegBytes[1] === 0xd8
   const isAvi = jpegBytes[0] === 0x52 && jpegBytes[1] === 0x49 && jpegBytes[2] === 0x46 && jpegBytes[3] === 0x46
@@ -502,13 +516,13 @@ export async function writeFileE87(opts: UploadOptions): Promise<void> {
     pred: (f: E87Frame) => boolean,
     timeout = 8000,
     label = 'matching E87 frame',
-  ) => waitForNotificationFrame(notificationQueue, pred, timeout, label, log)
+  ) => waitForNotificationFrame(uploadNotificationQueue, pred, timeout, label, log)
 
   const waitRaw = (
     pred: (raw: Uint8Array) => boolean,
     timeout = 2000,
     label = 'matching raw notification',
-  ) => waitForRawNotification(notificationQueue, pred, timeout, label, log)
+  ) => waitForRawNotification(uploadNotificationQueue, pred, timeout, label, log)
 
   let fileCompleteAutoRespond = false
   let fileCompleteHandled = false
@@ -858,6 +872,10 @@ export async function writeFileE87(opts: UploadOptions): Promise<void> {
       }
     }
   } finally {
+    for (const c of conn.notifyChars) {
+      c.removeEventListener('characteristicvaluechanged', mirrorNotificationForUpload)
+    }
+
     // Clean up auto-responder
     for (const c of conn.notifyChars) {
       c.removeEventListener('characteristicvaluechanged', autoResponder)
