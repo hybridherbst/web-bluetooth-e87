@@ -134,10 +134,10 @@
 <style>
   .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
   .buttons { margin-bottom: 0.6rem; }
-  .dim { font-weight: 400; color: #7a9dc5; }
+  .dim { font-weight: 400; color: #a3a3a3; }
   .settings { display: flex; gap: 0.8rem; margin: 0.6rem 0; flex-wrap: wrap; align-items: flex-end; }
   .settings label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.88rem; }
-  .settings label span { color: #b0cce8; }
+  .settings label span { color: #d4d4d4; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-transform: uppercase; letter-spacing: -0.08em; font-size: 0.75rem; }
   .pattern-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -147,46 +147,47 @@
   .pattern-card {
     display: flex; flex-direction: column; align-items: center;
     padding: 0.6rem 0.4rem; text-align: center;
-    border-radius: 10px; gap: 0.2rem;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #e6f1ff;
+    border-radius: 2px; gap: 0.2rem;
+    background: #111;
+    border: 1px solid #2a2a2a;
+    color: #f5f5f5;
     cursor: pointer;
   }
-  .pattern-card:hover:not(:disabled) { border-color: rgba(129, 178, 255, 0.5); }
+  .pattern-card:hover:not(:disabled) { border-color: #3fd2fb; background: rgba(63, 210, 251, 0.1); }
   .pattern-card .pattern-icon { font-size: 1.5rem; }
   .pattern-card .pattern-name { font-size: 0.8rem; font-weight: 600; }
-  .pattern-card .pattern-desc { font-size: 0.7rem; color: #8badd4; }
+  .pattern-card .pattern-desc { font-size: 0.7rem; color: #a3a3a3; }
   .active {
-    border-color: rgba(129, 178, 255, 0.9) !important;
-    background: rgba(129, 178, 255, 0.14);
+    border-color: #3fd2fb !important;
+    background: rgba(63, 210, 251, 0.2);
   }
 
   /* Apple-style segmented control */
   .segmented-control {
     display: inline-flex;
-    background: rgba(255, 255, 255, 0.06);
-    border-radius: 10px;
+    background: #111;
+    border: 1px solid #2a2a2a;
+    border-radius: 999px;
     padding: 3px;
     gap: 2px;
     margin-top: 0.3rem;
   }
   .seg-btn {
     padding: 0.35rem 1.1rem;
-    border-radius: 8px;
+    border-radius: 999px;
     border: none;
     background: transparent;
-    color: #8badd4;
+    color: #a3a3a3;
     font-size: 0.82rem;
     font-weight: 600;
     cursor: pointer;
     transition: background 0.2s, color 0.2s;
   }
-  .seg-btn:hover:not(:disabled):not(.seg-active) { color: #c0d8f0; }
+  .seg-btn:hover:not(:disabled):not(.seg-active) { color: #fff; background: rgba(63, 210, 251, 0.12); }
   .seg-active {
-    background: rgba(129, 178, 255, 0.18);
-    color: #e6f1ff;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+    background: rgba(63, 210, 251, 0.2);
+    color: #3fd2fb;
+    box-shadow: none;
   }
   .seg-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

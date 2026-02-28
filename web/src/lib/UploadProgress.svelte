@@ -70,12 +70,13 @@
 <style>
   .progress-wrap {
     width: 100%; height: 10px; border-radius: 99px; overflow: hidden;
-    background: rgba(255, 255, 255, 0.1); margin-top: 0.5rem;
+    background: #1a1a1a; margin-top: 0.5rem;
+    border: 1px solid #2a2a2a;
   }
   .progress-bar {
-    height: 100%; background: linear-gradient(90deg, #6be4ff, #6f95ff);
+    height: 100%; background: linear-gradient(90deg, #96acce, #6c82a5);
     transition: width 100ms ease;
   }
   .upload-stats { margin: 0.3rem 0 0; }
-  .progress-label { margin: 0.2rem 0; color: #9ec0e8; font-size: 0.85rem; }
+  .progress-label { margin: 0.2rem 0; color: #b8c3d9; font-size: 0.85rem; }
 </style>

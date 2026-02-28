@@ -113,12 +113,12 @@
   }
   .avi-canvas {
     border-radius: 50%;
-    border: 2px solid rgba(129, 178, 255, 0.4);
+    border: 2px solid #2a2a2a;
     background: #000;
   }
   .avi-controls {
     display: flex; align-items: center; gap: 0.5rem;
   }
   .small { padding: 0.3rem 0.5rem; font-size: 0.85rem; }
-  .dim { font-weight: 400; color: #7a9dc5; }
+  .dim { font-weight: 400; color: #9ba1ad; }
 </style>

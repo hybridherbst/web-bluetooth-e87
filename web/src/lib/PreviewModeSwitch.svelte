@@ -33,8 +33,8 @@
   .mode-switch {
     display: inline-flex;
     border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.18);
-    background: rgba(255,255,255,0.05);
+    border: 1px solid #2a2a2a;
+    background: #111;
     padding: 3px;
     gap: 3px;
   }
@@ -42,13 +42,15 @@
     border-radius: 999px;
     border: none;
     background: transparent;
-    color: #d8e9ff;
+    color: #d4d4d4;
     padding: 0.35rem 0.75rem;
     font-size: 0.82rem;
     font-weight: 700;
+    transition: background 130ms ease, color 130ms ease;
   }
+  .mode-switch button:hover { background: rgba(63, 210, 251, 0.14); color: #fff; }
   .mode-switch button.active {
-    background: linear-gradient(180deg, rgba(181, 210, 255, 0.3), rgba(129, 178, 255, 0.3));
-    color: #f7fbff;
+    background: rgba(63, 210, 251, 0.2);
+    color: #3fd2fb;
   }
 </style>

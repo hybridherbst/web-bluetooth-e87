@@ -27,6 +27,7 @@
 
   type PreviewMode = 'live' | 'preview'
   type QrCellStyle = 'square' | 'round' | 'squircle'
+  type QrOutsideMode = 'on' | 'off'
 
   type SavedSettings = {
     uploadMode?: UploadMode
@@ -39,7 +40,7 @@
     qrDarkColor?: string
     qrLightColor?: string
     qrDotStyle?: QrCellStyle
-    qrEdgeStyle?: QrCellStyle
+    qrOutsideMode?: QrOutsideMode
     qrZoom?: number
     qrRotation?: number
     imageBackdropColor?: string
@@ -60,13 +61,16 @@
   const SETTINGS_STORAGE_KEY = 'badgeWriterSettings.v2'
 
   function loadSettings(): SavedSettings {
-    if (typeof window === 'undefined') return {}
     try {
       const raw = localStorage.getItem(SETTINGS_STORAGE_KEY)
       return raw ? JSON.parse(raw) as SavedSettings : {}
     } catch {
       return {}
     }
+  }
+
+  function pm(value: unknown, fallback: PreviewMode): PreviewMode {
+    return value === 'live' || value === 'preview' ? value : fallback
   }
 
   function n(value: unknown, fallback: number): number {
@@ -77,20 +81,11 @@
     return typeof value === 'string' ? value : fallback
   }
 
-  function pm(value: unknown, fallback: PreviewMode): PreviewMode {
-    return value === 'live' || value === 'preview' ? value : fallback
-  }
-
   const saved = loadSettings()
 
-  // ─── Debug flag ───
   const debugMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('debug')
 
-  // ─── BLE connection state ───
-  // MUST be $state.raw — Svelte 5's deep proxy breaks the shared
-  // notificationQueue array (onNotification pushes to the original,
-  // but writeFileE87 would poll the proxy copy → auth timeout).
-  let conn: E87Connection | null = $state.raw(null)
+  let conn: E87Connection | null = $state(null)
   let isConnecting = $state(false)
   let isWriting = $state(false)
   let cancelRequested = $state(false)
@@ -99,16 +94,13 @@
   let status = $state('Disconnected')
   let batteryLevel: number | null = $state(null)
   let batteryUpdatedAt = $state('')
-
   let logs: string[] = $state([])
 
-  // ─── Upload mode & file state ───
   let uploadMode: UploadMode = $state((saved.uploadMode ?? 'pattern') as UploadMode)
   let selectedFile: File | null = $state(null)
   let selectedFiles: File[] = $state([])
   let previewUrl: string | null = $state(null)
 
-  // ─── Mode-specific settings ───
   let videoFps = $state(n(saved.videoFps, 12))
   let sequenceFps = $state(n(saved.sequenceFps, 1))
   let videoTrimStart = $state(0)
@@ -121,12 +113,11 @@
   let qrDarkColor = $state(s(saved.qrDarkColor, '#111111'))
   let qrLightColor = $state(s(saved.qrLightColor, '#f5f7ff'))
   let qrDotStyle: QrCellStyle = $state((saved.qrDotStyle ?? 'round') as QrCellStyle)
-  let qrEdgeStyle: QrCellStyle = $state((saved.qrEdgeStyle ?? 'squircle') as QrCellStyle)
+  let qrOutsideMode: QrOutsideMode = $state((saved.qrOutsideMode ?? 'on') as QrOutsideMode)
   let qrZoom = $state(n(saved.qrZoom, 1.08))
-  let qrRotation = $state(n(saved.qrRotation, 0))
+  let qrRotation = $state(Math.round(n(saved.qrRotation, 0) / 45) * 45)
   let imageBackdropColor = $state(s(saved.imageBackdropColor, '#000000'))
 
-  // ─── Preview state ───
   let aviPreviewFrames: ImageBitmap[] = $state([])
   let aviPreviewFps = $state(12)
   let isGeneratingPreview = $state(false)
@@ -165,7 +156,6 @@
   let videoScrubElement: HTMLVideoElement | null = $state(null)
   let videoScrubRequestId = $state(0)
 
-  // ─── Upload progress state ───
   let progress = $state(0)
   let progressLabel = $state('')
   let uploadStartTime = $state(0)
@@ -258,7 +248,7 @@
       qrDarkColor,
       qrLightColor,
       qrDotStyle,
-      qrEdgeStyle,
+      qrOutsideMode,
       qrZoom,
       qrRotation,
       imageBackdropColor,
@@ -510,7 +500,7 @@
       qrDarkColor,
       qrLightColor,
       qrDotStyle,
-      qrEdgeStyle,
+      qrOutsideMode,
       qrZoom.toFixed(3),
       qrRotation.toFixed(1),
     ].join('|')
@@ -708,7 +698,7 @@
       qrDarkColor,
       qrLightColor,
       qrDotStyle,
-      qrEdgeStyle,
+      qrOutsideMode,
       qrZoom.toFixed(3),
       qrRotation.toFixed(1),
     ].join('|'))
@@ -734,15 +724,17 @@
     const coreEndExclusive = totalGridModules - outerBandModules
     const qrStart = outerBandModules + quietModules
 
-    for (let row = outerStart; row < outerEndExclusive; row++) {
-      for (let col = outerStart; col < outerEndExclusive; col++) {
-        const inCore = row >= coreStart && row < coreEndExclusive && col >= coreStart && col < coreEndExclusive
-        if (inCore) continue
+    if (qrOutsideMode === 'on') {
+      for (let row = outerStart; row < outerEndExclusive; row++) {
+        for (let col = outerStart; col < outerEndExclusive; col++) {
+          const inCore = row >= coreStart && row < coreEndExclusive && col >= coreStart && col < coreEndExclusive
+          if (inCore) continue
 
-        const x = gridOffset + col * modulePx
-        const y = gridOffset + row * modulePx
-        const color = rng() > 0.5 ? qrDarkColor : qrLightColor
-        drawStyledCell(ctx, x + cellInset, y + cellInset, cellSize, qrEdgeStyle, color)
+          const x = gridOffset + col * modulePx
+          const y = gridOffset + row * modulePx
+          const color = rng() > 0.5 ? qrDarkColor : qrLightColor
+          drawStyledCell(ctx, x + cellInset, y + cellInset, cellSize, qrDotStyle, color)
+        }
       }
     }
 
@@ -773,9 +765,8 @@
       preparedPayloadLabel = `QR image — ${formatBytes(jpeg.length)}`
       revokePreviewUrl()
       previewUrl = URL.createObjectURL(makeBlob(jpeg, 'image/jpeg'))
-      log(`QR ready: ${formatBytes(jpeg.length)}`)
-    } catch (err) {
-      log(`QR generation failed: ${(err as Error).message}`)
+    } catch {
+      // Keep QR auto-regeneration silent to avoid log clutter.
     } finally {
       isGeneratingQr = false
     }
@@ -853,14 +844,17 @@
     }
 
     if (uploadMode === 'image') {
+      if (imageLiveFrames.length === 0 && selectedFile) await prepareImageLiveFrames()
       if (imageLiveFrames.length === 0) throw new Error('No image selected.')
       return previewBitmapToJpeg(imageLiveFrames[0], getTransform('image'))
     }
     if (uploadMode === 'images') {
+      if (sequenceLiveFrames.length === 0 && selectedFiles.length > 0) await prepareSequenceLiveFrames()
       if (sequenceLiveFrames.length === 0) throw new Error('No sequence selected.')
       return previewBitmapsToAvi(sequenceLiveFrames, sequenceFps, getTransform('images'), log)
     }
     if (uploadMode === 'video') {
+      if (videoLiveFrames.length === 0 && selectedFile) await prepareVideoLiveFrames()
       if (videoLiveFrames.length === 0) throw new Error('No video frames cached.')
       return previewBitmapsToAvi(videoLiveFrames, videoFps, getTransform('video'), log)
     }
@@ -993,10 +987,10 @@
   <section class="panel">
     <div class="row buttons">
       <button onclick={connect} disabled={isConnecting || isWriting}>
-        {isConnecting ? 'Connecting…' : 'Connect'}
+        {isConnecting ? '🔄 Connecting…' : '🔗 Connect'}
       </button>
-      <button onclick={disconnect} disabled={!conn?.server?.connected || isWriting}>Disconnect</button>
-      <button class="secondary" onclick={cancelWrite} disabled={!isWriting}>Cancel</button>
+      <button onclick={disconnect} disabled={!conn?.server?.connected || isWriting}>🔌 Disconnect</button>
+      <button class="secondary" onclick={cancelWrite} disabled={!isWriting}>🛑 Cancel</button>
     </div>
     <div class="status">Status: {status}</div>
     {#if batteryLevel !== null}
@@ -1078,7 +1072,7 @@
       {#if imagePreviewMode === 'preview' && selectedFile}
         <div class="row buttons" style="margin-top:0.4rem">
           <button onclick={generatePreview} disabled={isWriting || isGeneratingPreview}>
-            {isGeneratingPreview ? 'Generating…' : 'Generate Preview Image'}
+            {isGeneratingPreview ? '⚙️ Generating…' : '🧪 Generate Preview'}
           </button>
         </div>
       {/if}
@@ -1101,7 +1095,7 @@
       {:else if sequencePreviewMode === 'preview'}
         <div class="row buttons" style="margin-top:0.4rem">
           <button onclick={generatePreview} disabled={isWriting || isGeneratingPreview || selectedFiles.length === 0}>
-            {isGeneratingPreview ? 'Generating…' : 'Generate AVI Preview'}
+            {isGeneratingPreview ? '⚙️ Generating…' : '🧪 Generate Preview'}
           </button>
         </div>
       {/if}
@@ -1138,7 +1132,7 @@
       {:else if videoPreviewMode === 'preview'}
         <div class="row buttons" style="margin-top:0.4rem">
           <button onclick={generatePreview} disabled={isWriting || isGeneratingPreview || !selectedFile}>
-            {isGeneratingPreview ? 'Generating…' : 'Generate AVI Preview'}
+            {isGeneratingPreview ? '⚙️ Generating…' : '🧪 Generate Preview'}
           </button>
         </div>
       {/if}
@@ -1149,7 +1143,7 @@
         bind:qrDarkColor
         bind:qrLightColor
         bind:qrDotStyle
-        bind:qrEdgeStyle
+        bind:qrOutsideMode
         bind:qrZoom
         bind:qrRotation
       />
@@ -1205,10 +1199,10 @@
     <!-- Upload button -->
     <div class="row buttons" style="margin-top:0.5rem">
       <button onclick={startUpload} disabled={!conn || isWriting}>
-        {isWriting ? 'Uploading…' : 'Upload'}
+        {isWriting ? '📡 Sending…' : '📡 Send to Device'}
       </button>
       <button onclick={downloadGenerated} disabled={isWriting}>
-        Download Generated
+        💾 Download
       </button>
     </div>
 
@@ -1236,10 +1230,14 @@
 
 <style>
   :global(body) {
+    --base: #3fd2fb;
+    --neutral-800: #2a2a2a;
+    --neutral-900: #171717;
+    --neutral-950: #0f0f0f;
     margin: 0;
-    font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    background: linear-gradient(180deg, #09111d 0%, #0f1d34 100%);
-    color: #e6f1ff;
+    font-family: 'Inter', 'IBM Plex Sans', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #000;
+    color: #fff;
     min-height: 100vh;
   }
   .app {
@@ -1249,40 +1247,65 @@
     padding: 1rem;
     box-sizing: border-box;
   }
-  h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
-  .hint { margin: 0 0 0.8rem; color: #8badd4; font-size: 0.88rem; }
+  h1 { margin: 0 0 0.25rem; font-size: 1.6rem; letter-spacing: -0.01em; }
+  .hint { margin: 0 0 0.8rem; color: #a3a3a3; font-size: 0.88rem; }
   .panel {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 12px;
+    background: var(--neutral-900);
+    border: 1px solid var(--neutral-800);
+    box-shadow: none;
+    border-radius: 2px;
     padding: 1rem;
     margin-bottom: 0.8rem;
   }
   .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
   .buttons { margin-bottom: 0.6rem; }
-  .mode-tabs { border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.6rem; margin-bottom: 0.6rem; }
-  .status { font-weight: 600; color: #d4e6ff; margin-bottom: 0.15rem; }
-  .dim { font-weight: 400; color: #7a9dc5; }
+  .mode-tabs { border-bottom: 1px solid var(--neutral-800); padding-bottom: 0.6rem; margin-bottom: 0.6rem; }
+  .status { font-weight: 600; color: #e9e9ec; margin-bottom: 0.15rem; }
+  .dim { font-weight: 400; color: #a3a3a3; }
   .payload-info { font-size: 0.8rem; margin: 0.2rem 0; text-align: center; }
   .settings { display: flex; gap: 0.8rem; margin: 0.6rem 0; flex-wrap: wrap; align-items: flex-end; }
   .settings label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.88rem; }
-  .settings label span { color: #b0cce8; }
+  .settings label span {
+    color: #d4d4d4;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    text-transform: uppercase;
+    letter-spacing: -0.08em;
+    font-size: 0.75rem;
+  }
   input, button {
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.16);
-    background: rgba(255, 255, 255, 0.07);
-    color: #f3f9ff;
+    border-radius: 2px;
+    border: 1px solid var(--neutral-800);
+    background: #000;
+    color: #f5f5f5;
     padding: 0.5rem 0.7rem;
     font-size: 0.9rem;
   }
   input[type="number"] { width: 90px; max-width: 100%; }
-  button { cursor: pointer; font-weight: 600; }
-  button:hover:not(:disabled) { border-color: rgba(129, 178, 255, 0.9); }
+  button {
+    cursor: pointer;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: -0.08em;
+    color: var(--base);
+    background: color-mix(in srgb, var(--base) 8%, transparent);
+    border-color: color-mix(in srgb, var(--base) 36%, var(--neutral-800));
+  }
+  button:hover:not(:disabled) {
+    border-color: var(--base);
+    background: color-mix(in srgb, var(--base) 20%, transparent);
+    box-shadow: none;
+  }
   button:disabled { opacity: 0.45; cursor: not-allowed; }
-  button.secondary { background: rgba(255, 100, 100, 0.12); }
+  button.secondary {
+    border-color: rgba(255, 77, 77, 0.55);
+    background: rgba(255, 77, 77, 0.08);
+    color: #ff8f8f;
+  }
   button.active {
-    border-color: rgba(129, 178, 255, 0.9);
-    background: rgba(129, 178, 255, 0.14);
+    border-color: var(--base);
+    background: color-mix(in srgb, var(--base) 20%, transparent);
+    color: var(--base);
   }
   .logs h2 { margin: 0 0 0.3rem; font-size: 0.95rem; }
   .logs ul {
@@ -1290,17 +1313,22 @@
     max-height: 220px; overflow: auto;
   }
   .logs li {
-    color: #b8d4f0;
+    color: #a3a3a3;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.8rem; line-height: 1.35; padding: 1px 0;
     word-break: break-all;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 
   /* ─── Mobile ─── */
   @media (max-width: 600px) {
     .app { padding: 0.5rem; }
     h1 { font-size: 1.25rem; }
-    .panel { padding: 0.7rem; border-radius: 8px; }
+    .panel { padding: 0.7rem; border-radius: 2px; }
     .row { gap: 0.4rem; }
     .settings { gap: 0.5rem; }
     .settings label { min-width: 0; flex: 1 1 auto; }

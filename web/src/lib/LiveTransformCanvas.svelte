@@ -59,7 +59,7 @@
     ctx.fill()
     ctx.restore()
 
-    ctx.strokeStyle = 'rgba(129, 178, 255, 0.4)'
+    ctx.strokeStyle = 'rgba(142, 163, 198, 0.45)'
     ctx.lineWidth = 2
     ctx.beginPath()
     ctx.arc(canvas.width / 2, canvas.height / 2, canvas.width / 2 - 1, 0, Math.PI * 2)
@@ -198,7 +198,7 @@
   }
   .canvas {
     border-radius: 50%;
-    border: 2px solid rgba(129, 178, 255, 0.4);
+    border: 2px solid rgba(142, 163, 198, 0.45);
     background: #000;
     touch-action: none;
     cursor: grab;
@@ -212,5 +212,5 @@
     justify-content: center;
   }
   .small { padding: 0.3rem 0.5rem; font-size: 0.85rem; }
-  .dim { color: #7a9dc5; font-size: 0.8rem; }
+  .dim { color: #9ba1ad; font-size: 0.8rem; }
 </style>
