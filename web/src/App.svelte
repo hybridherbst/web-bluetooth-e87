@@ -279,12 +279,6 @@
       const nextConn = await connectE87(log)
       batteryLevel = nextConn.batteryLevel
       batteryUpdatedAt = nextConn.batteryUpdatedAt
-      // Auto-read battery via Qix 9E protocol
-      try {
-        const result = await refreshBatteryE87(nextConn, log)
-        batteryLevel = result.level
-        batteryUpdatedAt = result.updatedAt
-      } catch { /* best effort */ }
       // Auto-read screen info
       try {
         const info = await getScreenInfoE87(nextConn, log)
@@ -1360,23 +1354,6 @@
       <div class="status">Battery: {batteryLevel}% <span class="dim">({batteryUpdatedAt})</span></div>
     {/if}
 
-    <div class="settings" style="margin-top:0.5rem">
-      <label style="min-width: 280px; flex:1">
-        <span>Small files</span>
-        <select bind:value={selectedSmallFileKey} disabled={isDeviceOpsBusy || smallFiles.length === 0}>
-          <option value="">-- none --</option>
-          {#each smallFiles as f}
-            <option value={smallFileKey(f)}>{f.typeName} — id {f.id} — {formatBytes(f.size)}</option>
-          {/each}
-        </select>
-      </label>
-    </div>
-    {#if smallFileReadText}
-      <textarea readonly rows="8" value={smallFileReadText}></textarea>
-    {/if}
-    {#if rcspInfoText}
-      <textarea readonly rows="10" value={rcspInfoText}></textarea>
-    {/if}
   </section>
 
   <!-- ═══ Upload panel ═══ -->

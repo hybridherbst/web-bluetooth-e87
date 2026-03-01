@@ -983,45 +983,65 @@ export async function ensureE87Auth(conn: E87Connection, log: (msg: string) => v
 
   conn.authInFlight = (async () => {
     const writeChunk = (chunk: Uint8Array) => writeChunkTo(conn.writeChar, chunk)
+    const authNotificationQueue: Uint8Array[] = [...conn.notificationQueue]
+    const mirrorNotificationForAuth = (event: Event) => {
+      const target = event.target as BluetoothRemoteGATTCharacteristic
+      const value = target.value
+      if (!value) return
+      const raw = new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
+      authNotificationQueue.push(raw)
+      if (authNotificationQueue.length > 200) authNotificationQueue.shift()
+    }
+
+    for (const c of conn.notifyChars) {
+      c.addEventListener('characteristicvaluechanged', mirrorNotificationForAuth)
+    }
+
     const waitRaw = (
       pred: (raw: Uint8Array) => boolean,
       timeout = 5000,
       label = 'matching raw notification',
-    ) => waitForRawNotification(conn.notificationQueue, pred, timeout, label, log)
+    ) => waitForRawNotification(authNotificationQueue, pred, timeout, label, log)
 
-    log('Auth: Starting Jieli RCSP crypto handshake...')
-    const randomAuthData = getRandomAuthData()
-    log(`Auth TX: [0x00, rand*16] = ${toHex(randomAuthData)}`)
-    await writeChunk(randomAuthData)
+    try {
+      log('Auth: Starting Jieli RCSP crypto handshake...')
+      const randomAuthData = getRandomAuthData()
+      log(`Auth TX: [0x00, rand*16] = ${toHex(randomAuthData)}`)
+      await writeChunk(randomAuthData)
 
-    const deviceResponse = await waitRaw(
-      (raw) => raw.length === 17 && raw[0] === 0x01,
-      5000,
-      'auth device response [0x01, encrypted*16]',
-    )
-    log(`Auth RX: ${toHex(deviceResponse)}`)
+      const deviceResponse = await waitRaw(
+        (raw) => raw.length === 17 && raw[0] === 0x01,
+        5000,
+        'auth device response [0x01, encrypted*16]',
+      )
+      log(`Auth RX: ${toHex(deviceResponse)}`)
 
-    log('Auth TX: [0x02, pass]')
-    await writeChunk(Uint8Array.of(0x02, 0x70, 0x61, 0x73, 0x73))
+      log('Auth TX: [0x02, pass]')
+      await writeChunk(Uint8Array.of(0x02, 0x70, 0x61, 0x73, 0x73))
 
-    const deviceChallenge = await waitRaw(
-      (raw) => raw.length === 17 && raw[0] === 0x00,
-      5000,
-      'auth device challenge [0x00, challenge*16]',
-    )
-    log(`Auth RX challenge: ${toHex(deviceChallenge)}`)
+      const deviceChallenge = await waitRaw(
+        (raw) => raw.length === 17 && raw[0] === 0x00,
+        5000,
+        'auth device challenge [0x00, challenge*16]',
+      )
+      log(`Auth RX challenge: ${toHex(deviceChallenge)}`)
 
-    const encryptedResponse = getEncryptedAuthData(deviceChallenge)
-    log(`Auth TX encrypted: ${toHex(encryptedResponse)}`)
-    await writeChunk(encryptedResponse)
+      const encryptedResponse = getEncryptedAuthData(deviceChallenge)
+      log(`Auth TX encrypted: ${toHex(encryptedResponse)}`)
+      await writeChunk(encryptedResponse)
 
-    const authConfirm = await waitRaw(
-      (raw) => raw.length >= 5 && raw[0] === 0x02 && raw[1] === 0x70 && raw[2] === 0x61 && raw[3] === 0x73 && raw[4] === 0x73,
-      5000,
-      'auth pass confirmation',
-    )
-    log(`Auth SUCCESS: ${toHex(authConfirm)}`)
-    conn.isAuthenticated = true
+      const authConfirm = await waitRaw(
+        (raw) => raw.length >= 5 && raw[0] === 0x02 && raw[1] === 0x70 && raw[2] === 0x61 && raw[3] === 0x73 && raw[4] === 0x73,
+        5000,
+        'auth pass confirmation',
+      )
+      log(`Auth SUCCESS: ${toHex(authConfirm)}`)
+      conn.isAuthenticated = true
+    } finally {
+      for (const c of conn.notifyChars) {
+        c.removeEventListener('characteristicvaluechanged', mirrorNotificationForAuth)
+      }
+    }
   })()
 
   try {
