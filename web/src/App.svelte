@@ -9,6 +9,9 @@
     imageFileToPreviewBitmap,
     imagesToPreviewBitmaps,
     videoToPreviewBitmaps,
+    filesToExpandedPreviewFrames,
+    flattenExpandedFrames,
+    type ExpandedFileFrames,
     type TransformSettings,
     type OutputFrameSize,
   } from './lib/image-processing'
@@ -174,6 +177,7 @@
 
   let imageLiveFrames: ImageBitmap[] = $state([])
   let sequenceLiveFrames: ImageBitmap[] = $state([])
+  let sequenceFrameInfo: ExpandedFileFrames[] = $state([])
   let videoLiveFrames: ImageBitmap[] = $state([])
 
   let imageScale = $state(n(saved.imageScale, 1))
@@ -245,10 +249,11 @@
       const canvas = new OffscreenCanvas(output.width, output.height)
       const ctx = canvas.getContext('2d')
       if (!ctx) throw new Error('Could not create 2D canvas context.')
+      ctx.imageSmoothingEnabled = false
       ctx.fillStyle = 'black'
       ctx.fillRect(0, 0, output.width, output.height)
       ctx.drawImage(bitmap, 0, 0, output.width, output.height)
-      const resized = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 })
+      const resized = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.95 })
       return new Uint8Array(await resized.arrayBuffer())
     } finally {
       bitmap.close()
@@ -670,6 +675,7 @@
       const canvas = new OffscreenCanvas(size, size)
       const ctx = canvas.getContext('2d')
       if (!ctx) return
+      ctx.imageSmoothingEnabled = false
 
       const srcFullW = video.videoWidth
       const srcFullH = video.videoHeight
@@ -714,8 +720,45 @@
   async function prepareSequenceLiveFrames(): Promise<void> {
     clearFrames(sequenceLiveFrames)
     sequenceLiveFrames = []
+    sequenceFrameInfo = []
     if (selectedFiles.length === 0) return
-    sequenceLiveFrames = await imagesToPreviewBitmaps(selectedFiles)
+    const expanded = await filesToExpandedPreviewFrames(selectedFiles)
+    sequenceFrameInfo = expanded
+    sequenceLiveFrames = flattenExpandedFrames(expanded)
+    maybeAutoAdjustSequenceFpsForAnimations(expanded)
+  }
+
+  /**
+   * If any selected file is an animated image (GIF/animated WebP), inspect
+   * its intrinsic frame durations and pick a sequence fps that matches.
+   *  - All durations uniform (±5%): set fps = 1e6/avg, preserves timing exactly.
+   *  - Non-uniform: use the average as a best-effort approximation and warn.
+   *  - No animations: leave the user-set fps alone.
+   */
+  function maybeAutoAdjustSequenceFpsForAnimations(expanded: ExpandedFileFrames[]): void {
+    const animDurations: number[] = []
+    let animCount = 0
+    for (const e of expanded) {
+      if (e.fromAnimation && e.durations.length > 0) {
+        animCount++
+        animDurations.push(...e.durations)
+      }
+    }
+    if (animDurations.length === 0) return
+
+    const sum = animDurations.reduce((a, b) => a + b, 0)
+    const avg = sum / animDurations.length
+    const maxDev = animDurations.reduce((m, d) => Math.max(m, Math.abs(d - avg)), 0)
+    const uniform = avg > 0 && (maxDev / avg) <= 0.05
+
+    const fpsFromAvg = Math.max(1, Math.min(30, Math.round(1_000_000 / Math.max(1, avg))))
+    sequenceFps = fpsFromAvg
+
+    if (uniform) {
+      log(`Auto fps: ${fpsFromAvg} (from ${animCount} animation${animCount > 1 ? 's' : ''}, uniform timing ${(avg / 1000).toFixed(1)}ms/frame).`)
+    } else {
+      log(`Auto fps: ${fpsFromAvg} (from ${animCount} animation${animCount > 1 ? 's' : ''}, variable timing — using average ${(avg / 1000).toFixed(1)}ms/frame; pauses may be approximated).`)
+    }
   }
 
   async function prepareVideoLiveFrames(): Promise<void> {
@@ -1438,6 +1481,7 @@
       <SequenceMode
         {isWriting}
         {selectedFiles}
+        frameInfo={sequenceFrameInfo}
         bind:sequenceFps
         onSelectFiles={setMultipleFiles}
       />
