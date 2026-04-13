@@ -1,8 +1,8 @@
 /**
- * Image/video → 368×368 JPEG frame conversion for E87/L8 badge.
+ * Image/video → JPEG frame conversion for E87/L8 badge.
  *
- * Handles single images (with quality bracketing to hit size targets),
- * multi-image sequences → AVI, and video → AVI with trim/zoom support.
+ * All canvas draw operations disable smoothing so pixel art / hard-edged
+ * content is resampled with nearest-neighbor instead of bilinear.
  */
 
 import { buildMjpgAvi } from '../avi-builder'
@@ -13,6 +13,12 @@ export const E87_IMAGE_HEIGHT = 368
 export const E87_TARGET_IMAGE_BYTES = 16000
 export const MAX_UPLOAD_BYTES = 2_000_000
 export const LIVE_PREVIEW_SIZE = 512
+
+type Ctx2D = OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D
+
+function disableSmoothing(ctx: Ctx2D): void {
+  ctx.imageSmoothingEnabled = false
+}
 
 export interface TransformSettings {
   scale: number
@@ -62,6 +68,7 @@ function renderTransformedFrame(
   const dx = (width - drawW) / 2 + panX * (width / 2)
   const dy = (height - drawH) / 2 + panY * (height / 2)
 
+  disableSmoothing(ctx)
   ctx.fillStyle = transform.backdropColor ?? 'black'
   ctx.fillRect(0, 0, width, height)
   ctx.drawImage(source, dx, dy, drawW, drawH)
@@ -70,7 +77,7 @@ function renderTransformedFrame(
 async function squareBitmapToJpeg(
   bitmap: ImageBitmap,
   transform: TransformSettings,
-  quality = 0.88,
+  quality = 0.95,
   outputSize: OutputFrameSize = { width: E87_IMAGE_WIDTH, height: E87_IMAGE_HEIGHT },
 ): Promise<Uint8Array> {
   const width = Math.max(1, Math.round(outputSize.width))
@@ -106,6 +113,7 @@ export async function imageFileTo368JpegBytes(file: File): Promise<Uint8Array> {
       const canvas = new OffscreenCanvas(E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
       const ctx = canvas.getContext('2d')
       if (!ctx) throw new Error('Could not create 2D canvas context.')
+      disableSmoothing(ctx)
       ctx.fillStyle = 'black'
       ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
       ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
@@ -116,6 +124,7 @@ export async function imageFileTo368JpegBytes(file: File): Promise<Uint8Array> {
     canvas.height = E87_IMAGE_HEIGHT
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('Could not create fallback 2D canvas context.')
+    disableSmoothing(ctx)
     ctx.fillStyle = 'black'
     ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
     ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
@@ -124,7 +133,7 @@ export async function imageFileTo368JpegBytes(file: File): Promise<Uint8Array> {
     })
   }
 
-  const qualitySteps = [0.88, 0.8, 0.72, 0.64, 0.56, 0.48, 0.4, 0.34]
+  const qualitySteps = [0.98, 0.95, 0.88, 0.8, 0.72, 0.64, 0.56, 0.48, 0.4, 0.34]
   let blob: Blob | null = null
   for (const q of qualitySteps) {
     const candidate = await toJpegBlob(q)
@@ -143,17 +152,125 @@ export async function imageFileToPreviewBitmap(file: File, size = LIVE_PREVIEW_S
   const canvas = new OffscreenCanvas(size, size)
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not create 2D canvas context.')
+  disableSmoothing(ctx)
   ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, size, size)
   bitmap.close()
   return createImageBitmap(canvas)
 }
 
-export async function imagesToPreviewBitmaps(files: File[], size = LIVE_PREVIEW_SIZE): Promise<ImageBitmap[]> {
-  const out: ImageBitmap[] = []
-  for (const file of files) {
-    out.push(await imageFileToPreviewBitmap(file, size))
+async function bitmapToPreviewBitmap(source: ImageBitmap, size = LIVE_PREVIEW_SIZE): Promise<ImageBitmap> {
+  const { sx, sy, sw, sh } = cropToSquare(source)
+  const canvas = new OffscreenCanvas(size, size)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Could not create 2D canvas context.')
+  disableSmoothing(ctx)
+  ctx.drawImage(source, sx, sy, sw, sh, 0, 0, size, size)
+  return createImageBitmap(canvas)
+}
+
+/**
+ * Decode all frames from an animated image (GIF, animated WebP, etc.) using
+ * the browser-native WebCodecs `ImageDecoder` API. Returns each frame as an
+ * ImageBitmap plus its intrinsic display duration in microseconds.
+ */
+export interface DecodedAnimationFrame {
+  bitmap: ImageBitmap
+  /** Intrinsic frame duration in microseconds (1 / FPS × 1e6). */
+  duration: number
+}
+
+export async function decodeAnimatedImageFrames(file: File): Promise<DecodedAnimationFrame[]> {
+  const ImageDecoderCtor = (globalThis as unknown as { ImageDecoder?: typeof ImageDecoder }).ImageDecoder
+  if (!ImageDecoderCtor) {
+    throw new Error('ImageDecoder API not supported. Requires Chrome/Edge 94+.')
+  }
+  const buffer = await file.arrayBuffer()
+  const decoder = new ImageDecoderCtor({ data: buffer, type: file.type })
+  try {
+    await decoder.tracks.ready
+    const track = decoder.tracks.selectedTrack
+    if (!track) throw new Error('No decodable track in animation.')
+    const frameCount = track.frameCount
+    const out: DecodedAnimationFrame[] = []
+    for (let i = 0; i < frameCount; i++) {
+      const result = await decoder.decode({ frameIndex: i })
+      const bitmap = await createImageBitmap(result.image)
+      const duration = result.image.duration ?? 100_000
+      out.push({ bitmap, duration })
+      result.image.close()
+    }
+    return out
+  } finally {
+    decoder.close?.()
+  }
+}
+
+/** Returns true for file types WebCodecs ImageDecoder can unpack into multiple frames. */
+export function isAnimatedImageMime(type: string): boolean {
+  return type === 'image/gif' || type === 'image/webp' || type === 'image/apng' || type === 'image/avif'
+}
+
+export interface ExpandedFileFrames {
+  /** Source file index in the original File[] (for metadata). */
+  fileIndex: number
+  /** True if this came from an animated source (GIF / WebP anim / APNG / AVIF anim). */
+  fromAnimation: boolean
+  /** Preview-sized bitmaps, one per visual frame. */
+  bitmaps: ImageBitmap[]
+  /** Per-frame durations in microseconds; empty for stills. */
+  durations: number[]
+}
+
+/**
+ * Convert a list of files into preview bitmaps, expanding animated images
+ * (GIF, animated WebP) into all their frames while still returning one
+ * ExpandedFileFrames entry per source file.
+ */
+export async function filesToExpandedPreviewFrames(
+  files: File[],
+  size = LIVE_PREVIEW_SIZE,
+): Promise<ExpandedFileFrames[]> {
+  const out: ExpandedFileFrames[] = []
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]
+    if (isAnimatedImageMime(file.type)) {
+      try {
+        const decoded = await decodeAnimatedImageFrames(file)
+        const bitmaps: ImageBitmap[] = []
+        const durations: number[] = []
+        for (const frame of decoded) {
+          const preview = await bitmapToPreviewBitmap(frame.bitmap, size)
+          bitmaps.push(preview)
+          durations.push(frame.duration)
+          frame.bitmap.close()
+        }
+        out.push({ fileIndex: i, fromAnimation: true, bitmaps, durations })
+        continue
+      } catch (err) {
+        // Fall through to static handling if decode fails (e.g. a static GIF)
+        console.warn(`Animation decode failed for ${file.name}: ${(err as Error).message}. Falling back to first frame.`)
+      }
+    }
+    out.push({
+      fileIndex: i,
+      fromAnimation: false,
+      bitmaps: [await imageFileToPreviewBitmap(file, size)],
+      durations: [],
+    })
   }
   return out
+}
+
+/** Flatten ExpandedFileFrames into a plain ImageBitmap[]. */
+export function flattenExpandedFrames(expanded: ExpandedFileFrames[]): ImageBitmap[] {
+  const out: ImageBitmap[] = []
+  for (const e of expanded) out.push(...e.bitmaps)
+  return out
+}
+
+export async function imagesToPreviewBitmaps(files: File[], size = LIVE_PREVIEW_SIZE): Promise<ImageBitmap[]> {
+  const expanded = await filesToExpandedPreviewFrames(files, size)
+  return flattenExpandedFrames(expanded)
 }
 
 export async function previewBitmapToJpeg(
@@ -161,7 +278,7 @@ export async function previewBitmapToJpeg(
   transform: TransformSettings = DEFAULT_TRANSFORM,
   outputSize: OutputFrameSize = { width: E87_IMAGE_WIDTH, height: E87_IMAGE_HEIGHT },
 ): Promise<Uint8Array> {
-  return squareBitmapToJpeg(bitmap, transform, 0.88, outputSize)
+  return squareBitmapToJpeg(bitmap, transform, 0.95, outputSize)
 }
 
 export async function previewBitmapsToAvi(
@@ -175,7 +292,7 @@ export async function previewBitmapsToAvi(
   log?.(`Encoding ${bitmaps.length} cached frames to AVI...`)
   const frames: Uint8Array[] = []
   for (let i = 0; i < bitmaps.length; i++) {
-    frames.push(await squareBitmapToJpeg(bitmaps[i], transform, 0.88, outputSize))
+    frames.push(await squareBitmapToJpeg(bitmaps[i], transform, 0.95, outputSize))
     if ((i + 1) % 25 === 0) log?.(`  Encoded ${i + 1}/${bitmaps.length} frames...`)
   }
   const avi = buildMjpgAvi(frames, { fps })
@@ -187,7 +304,7 @@ export async function previewBitmapsToAvi(
  * Convert a single image file to a 368×368 JPEG frame at fixed quality.
  * Used for multi-frame AVI building.
  */
-export async function imageFileTo368JpegFrame(file: File, quality = 0.88): Promise<Uint8Array> {
+export async function imageFileTo368JpegFrame(file: File, quality = 0.95): Promise<Uint8Array> {
   const bitmap = await createImageBitmap(file)
   const srcRatio = bitmap.width / bitmap.height
   const targetRatio = E87_IMAGE_WIDTH / E87_IMAGE_HEIGHT
@@ -201,6 +318,7 @@ export async function imageFileTo368JpegFrame(file: File, quality = 0.88): Promi
   }
   const canvas = new OffscreenCanvas(E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
   const ctx = canvas.getContext('2d')!
+  disableSmoothing(ctx)
   ctx.fillStyle = 'black'
   ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
   ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
@@ -221,7 +339,7 @@ export async function imagesToAvi(
   const frames: Uint8Array[] = []
   for (let i = 0; i < files.length; i++) {
     log?.(`  Processing image ${i + 1}/${files.length}: ${files[i].name}`)
-    frames.push(await imageFileTo368JpegFrame(files[i], 0.88))
+    frames.push(await imageFileTo368JpegFrame(files[i], 0.95))
   }
   const avi = buildMjpgAvi(frames, { fps })
   log?.(`AVI built: ${frames.length} frames, ${formatBytes(avi.length)}`)
@@ -282,6 +400,7 @@ export async function videoToPreviewBitmaps(
   const canvas = new OffscreenCanvas(previewSize, previewSize)
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not create 2D canvas context.')
+  disableSmoothing(ctx)
 
   const srcFullW = video.videoWidth
   const srcFullH = video.videoHeight
@@ -341,6 +460,7 @@ export async function videoToAvi(
   const frameInterval = 1 / fps
   const canvas = new OffscreenCanvas(E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
   const ctx = canvas.getContext('2d')!
+  disableSmoothing(ctx)
   const frames: Uint8Array[] = []
 
   const srcFullW = video.videoWidth
@@ -369,7 +489,7 @@ export async function videoToAvi(
     ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
     ctx.drawImage(video, sx, sy, zoomedSize, zoomedSize, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
 
-    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.88 })
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.95 })
     frames.push(new Uint8Array(await blob.arrayBuffer()))
 
     if (frames.length % 10 === 0) log?.(`  Extracted ${frames.length} frames...`)

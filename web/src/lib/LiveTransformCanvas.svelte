@@ -47,6 +47,7 @@
     const dx = (canvas.width - drawW) / 2 + panX * (canvas.width / 2)
     const dy = (canvas.height - drawH) / 2 + panY * (canvas.height / 2)
 
+    ctx.imageSmoothingEnabled = false
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.fillStyle = backdropColor
     ctx.fillRect(0, 0, canvas.width, canvas.height)

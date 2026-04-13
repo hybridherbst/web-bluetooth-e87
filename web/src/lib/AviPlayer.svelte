@@ -22,6 +22,7 @@
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     const frame = frames[Math.min(idx, frames.length - 1)]
+    ctx.imageSmoothingEnabled = false
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.drawImage(frame, 0, 0, canvas.width, canvas.height)
     // Circular mask
