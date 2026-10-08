@@ -25,12 +25,15 @@
     getTargetFeatureMapE87,
     getSysInfoE87,
     browseFilesE87,
+    getStorageDevicesE87,
+    deleteFileE87,
     stopBrowseE87,
     getScreenInfoE87,
     type E87Connection,
     type UploadMode,
     type E87SmallFileEntry,
     type E87FileBrowseEntry,
+    type E87StorageDevice,
   } from './lib/e87-protocol'
   import { buildMjpgAvi } from './avi-builder'
   import type { PatternDef } from './pattern-generators'
@@ -130,6 +133,11 @@
   let isDeviceOpsBusy = $state(false)
   let smallFiles: E87SmallFileEntry[] = $state([])
   let browseEntries: E87FileBrowseEntry[] = $state([])
+  let browseDev = $state('')
+  let browseKind = $state<'1' | '0'>('0')
+  let storageDevices: E87StorageDevice[] = $state([])
+  let browsePath = $state('0')
+  let browsePageSize = $state(50)
   let selectedSmallFileKey = $state('')
   let smallFileReadText = $state('')
   let rcspInfoText = $state('')
@@ -385,25 +393,67 @@
     }
     isDeviceOpsBusy = true
     try {
-      // Try files first, then folders if empty
-      let results = await browseFilesE87(conn, log, { type: 1, readNum: 50 })
-      if (results.length === 0) {
-        results = await browseFilesE87(conn, log, { type: 0, readNum: 50 })
-      }
+      const clusters = browsePath
+        .split(/[\s,/]+/)
+        .filter((c) => c.length > 0)
+        .map((c) => Number.parseInt(c, 0) >>> 0)
+      const results = await browseFilesE87(conn, log, {
+        type: Number(browseKind),
+        readNum: Math.min(255, Math.max(1, Math.floor(Number(browsePageSize)) || 50)),
+        devHandle: browseDev.trim() === '' ? undefined : Number(browseDev.trim()),
+        clusters: clusters.length > 0 ? clusters : [0],
+      })
       browseEntries = results
-      const total = results.length
-      rcspInfoText = JSON.stringify({
-        command: 'FileBrowseCmd',
-        totalEntries: total,
-        entries: results,
-      }, null, 2)
-      status = total > 0 ? `FileBrowse: found ${total} entries.` : 'FileBrowse: no entries found on any storage.'
+      rcspInfoText = JSON.stringify({ command: 'FileBrowseCmd', totalEntries: results.length, entries: results }, null, 2)
+      status = results.length > 0 ? `FileBrowse: found ${results.length} entries.` : 'FileBrowse: no entries found.'
     } catch (error) {
       status = `FileBrowse failed: ${(error as Error).message}`
       log(status)
     } finally {
       isDeviceOpsBusy = false
     }
+  }
+
+  async function detectStorage(): Promise<void> {
+    if (!conn) {
+      status = 'Not connected.'
+      return
+    }
+    isDeviceOpsBusy = true
+    try {
+      storageDevices = await getStorageDevicesE87(conn, log)
+      status = `Storage: ${storageDevices.filter((d) => d.online).length} online of ${storageDevices.length} reported.`
+    } catch (error) {
+      status = `Detect storage failed: ${(error as Error).message}`
+      log(status)
+    } finally {
+      isDeviceOpsBusy = false
+    }
+  }
+
+  async function deleteBrowseEntry(entry: E87FileBrowseEntry): Promise<void> {
+    if (!conn || entry.isFolder || entry.handle === undefined) return
+    if (!window.confirm(`Permanently delete "${entry.name}" from the badge?`)) return
+    isDeviceOpsBusy = true
+    try {
+      await deleteFileE87(conn, log, { handle: entry.handle, cluster: entry.cluster, isFile: true })
+      status = `Deleted ${entry.name}.`
+    } catch (error) {
+      status = `Delete failed: ${(error as Error).message}`
+      log(status)
+      isDeviceOpsBusy = false
+      return
+    }
+    isDeviceOpsBusy = false
+    await browseFiles()
+  }
+
+  async function openBrowseFolder(entry: E87FileBrowseEntry): Promise<void> {
+    if (!entry.isFolder) return
+    const parts = browsePath.split(/[\s,/]+/).filter((c) => c.length > 0)
+    browsePath = [...parts, String(entry.cluster)].join(',')
+    browseKind = '0'
+    await browseFiles()
   }
 
   async function queryScreenInfo(): Promise<void> {
@@ -1575,6 +1625,46 @@
     />
   </section>
 
+  <!-- ═══ Device filesystem (experimental) ═══ -->
+  <section class="panel">
+    <h2>Device files <span class="dim">(experimental)</span></h2>
+    <div class="row buttons">
+      <input type="text" bind:value={browseDev} disabled={isDeviceOpsBusy} placeholder="handle (blank = all online)" size="22" />
+      <select bind:value={browseKind} disabled={isDeviceOpsBusy}>
+        <option value="0">path is folder (list contents)</option>
+        <option value="1">path is file</option>
+      </select>
+      <input type="number" min="1" max="255" bind:value={browsePageSize} disabled={isDeviceOpsBusy} title="entries per page" style="width:4.5rem" />
+      <input type="text" bind:value={browsePath} disabled={isDeviceOpsBusy} placeholder="clusters, e.g. 0 or 0,12" size="14" />
+      <button onclick={detectStorage} disabled={!conn || isWriting || isDeviceOpsBusy}>💾 Detect storage</button>
+      <button onclick={browseFiles} disabled={!conn || isWriting || isDeviceOpsBusy}>
+        {isDeviceOpsBusy ? '⏳ Browsing…' : '📂 Browse'}
+      </button>
+    </div>
+    {#if storageDevices.length > 0}
+      <ul class="browse-list">
+        {#each storageDevices as d}
+          <li>{d.online ? '🟢' : '⚪'} {d.name} <span class="dim">index {d.index}{d.online ? ` · handle ${d.handle}` : ' · offline'}</span></li>
+        {/each}
+      </ul>
+    {/if}
+    {#if browseEntries.length > 0}
+      <ul class="browse-list">
+        {#each browseEntries as e}
+          <li>
+            {#if e.isFolder}
+              <button class="link" onclick={() => openBrowseFolder(e)} disabled={isDeviceOpsBusy}>📁 {e.name}</button>
+            {:else}
+              📄 {e.name}
+              <button class="link" onclick={() => deleteBrowseEntry(e)} disabled={isDeviceOpsBusy}>🗑 delete</button>
+            {/if}
+            <span class="dim">cluster {e.cluster} · dev {e.devIndex}</span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
+
   <!-- ═══ Log panel ═══ -->
   <section class="panel logs">
     <h2>Log</h2>
@@ -1694,4 +1784,8 @@
     .logs ul { max-height: 160px; }
     .logs li { font-size: 0.7rem; }
   }
+
+  .browse-list { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: 0.9rem; }
+  .browse-list li { padding: 0.15rem 0; }
+  button.link { background: none; border: none; color: #3fd2fb; padding: 0; cursor: pointer; font: inherit; text-decoration: underline; }
 </style>

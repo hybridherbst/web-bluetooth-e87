@@ -294,9 +294,13 @@ export interface E87SmallFileReadResult {
 export interface E87FileBrowseEntry {
   name: string
   isFolder: boolean
-  sizeBytes: number
   cluster: number
+  fileNum: number
+  devIndex: number
+  unicode: boolean
   rawHex: string
+  /** Handle of the storage this entry was listed from (set by browseFilesE87). */
+  handle?: number
 }
 
 export interface E87TargetFeatureMapResult {
@@ -1207,194 +1211,407 @@ export async function deleteSmallFileE87(
 }
 
 /**
- * Browse device filesystem using RCSP StartFileBrowseCmd (opcode 0x0C).
+ * File browse over RCSP (cmd 0x0C / 0x0D), per the JieLi SDK
+ * (PathData, FileStruct, FileBrowseManager, FileBrowseCmdHandler).
  *
- * Parameter layout (from decompiled FileBrowseParam):
- *   [type:1] [readNum:1] [startIndex:2 BE] [devHandler:4 BE] [pathLen:2 LE] [path:N*4 BE]
+ * Request  (cmd 0x0C, flag 0xC0), params after the seq byte:
+ *   [type:1] [readNum:1] [startIndex:2 BE] [devHandle:4 BE] [pathLen:2 BE] [path: N x cluster:4 BE]
+ *   type: 0 = folder, 1 = file.  startIndex is 1-based.
  *
- * type: 0=folder, 1=file
- * devHandler: 0=USB, 1=SD0, 2=SD1, 3=Flash
+ * Response (cmd 0x0C, flag 0x00): body = [status][seq]. The JieLi SDK allows a trailing total
+ *   count (1, 2 or 4 bytes BE); the E87 sends none. The entries are NOT in this response.
  *
- * Response is parsed as file/folder entries.
+ * Entries are then pushed by the device as data frames (cmd 0x01, body = [seq][0x0C][bytes...]),
+ * which concatenate into a stream of FileStruct records (see parseBrowseEntries). The E87
+ * sends these with flag 0x80 (no response wanted), packing whole entries per frame.
+ * The device ends a page with StopFileBrowse (cmd 0x0D, flag 0xC0, body = [seq][reason]):
+ *   reason 0 = page done, more remain; 1 = page done, listing complete; other = failure code.
+ * The host acknowledges it with (flag 0x00, body = [0x00][seq]); the connection's
+ * auto-ack handler already does this for every device-initiated (flag 0xC0) frame.
  */
-async function sendFileBrowseRequest(
-  conn: E87Connection,
-  log: (msg: string) => void,
+const BROWSE_DATA_OPCODE = 0x0c
+
+const DEV_HANDLER_NAMES: Record<number, string> = {
+  0: 'USB', 1: 'SD0', 2: 'SD1', 3: 'Flash', 4: 'LineIn', 5: 'Flash2', 6: 'Flash3',
+}
+
+export function buildBrowseParams(
   type: number,
   readNum: number,
   startIndex: number,
-  devHandler: number,
+  devHandle: number,
   clusters: number[],
-): Promise<E87Frame> {
-  // Build path data: each cluster is a big-endian 4-byte int
-  const pathBytes = new Uint8Array(clusters.length * 4)
-  for (let i = 0; i < clusters.length; i++) {
-    const c = clusters[i]
-    pathBytes[i * 4 + 0] = (c >> 24) & 0xff
-    pathBytes[i * 4 + 1] = (c >> 16) & 0xff
-    pathBytes[i * 4 + 2] = (c >> 8) & 0xff
-    pathBytes[i * 4 + 3] = c & 0xff
-  }
-  const pathLen = pathBytes.length
-
-  // Serialize: [type][readNum][startIndex:2 BE][devHandler:4 BE][pathLen:2 LE][pathBytes]
-  const param = new Uint8Array(1 + 1 + 2 + 4 + 2 + pathLen)
-  param[0] = type & 0xff
-  param[1] = readNum & 0xff
-  param[2] = (startIndex >> 8) & 0xff
-  param[3] = startIndex & 0xff
-  param[4] = (devHandler >> 24) & 0xff
-  param[5] = (devHandler >> 16) & 0xff
-  param[6] = (devHandler >> 8) & 0xff
-  param[7] = devHandler & 0xff
-  param[8] = pathLen & 0xff        // LE low byte
-  param[9] = (pathLen >> 8) & 0xff // LE high byte
-  param.set(pathBytes, 10)
-
-  log(`FileBrowse: type=${type} readNum=${readNum} startIndex=${startIndex} devHandler=${devHandler} clusters=[${clusters}]`)
-
-  // Use manual send+wait so we can handle non-zero status without throwing
-  const seq = nextRcspSeq(conn)
-  const body = new Uint8Array(1 + param.length)
-  body[0] = seq
-  body.set(param, 1)
-  const frame = buildE87Frame(0xc0, 0x0c, body)
-  log(`TX RCSP cmd=0xc seq=${seq} len=${body.length}`)
-  await writeChunkTo(conn.writeChar, frame)
-
-  return waitForNotificationFrame(
-    conn.notificationQueue,
-    (f) => f.cmd === 0x0c && (f.flag & 0x80) === 0,
-    10000,
-    'rcsp ack cmd 0xc (FileBrowse)',
-    log,
-  )
+): Uint8Array {
+  const pathLen = clusters.length * 4
+  const out = new Uint8Array(10 + pathLen)
+  const view = new DataView(out.buffer)
+  out[0] = type & 0xff
+  out[1] = readNum & 0xff
+  view.setUint16(2, startIndex & 0xffff, false)
+  view.setUint32(4, devHandle >>> 0, false)
+  view.setUint16(8, pathLen, false)
+  clusters.forEach((c, i) => view.setUint32(10 + i * 4, c >>> 0, false))
+  return out
 }
 
-const DEV_HANDLER_NAMES: Record<number, string> = {
-  0: 'USB', 1: 'SD0', 2: 'SD1', 3: 'Flash',
+/**
+ * Parse a concatenated stream of FileStruct records:
+ *   [flags:1] [cluster:4 BE] [fileNum:2 BE] [nameLen:1] [name: nameLen bytes]
+ * flags: bit0 = is file, bit1 clear = name is UTF-16LE (set = GBK), bits2-6 = device index.
+ */
+export function parseBrowseEntries(data: Uint8Array): E87FileBrowseEntry[] {
+  const entries: E87FileBrowseEntry[] = []
+  let i = 0
+  while (data.length - i >= 8) {
+    const flags = data[i]
+    const nameLen = data[i + 7]
+    const end = i + 8 + nameLen
+    if (end > data.length) break
+    const unicode = (flags & 0x02) === 0
+    const nameBytes = data.slice(i + 8, end)
+    let name: string
+    try {
+      name = new TextDecoder(unicode ? 'utf-16le' : 'gbk').decode(nameBytes).replace(/\0+$/, '')
+    } catch {
+      name = toHex(nameBytes)
+    }
+    const dv = new DataView(data.buffer, data.byteOffset + i, 8)
+    entries.push({
+      name,
+      isFolder: (flags & 0x01) === 0,
+      cluster: dv.getUint32(1, false),
+      fileNum: dv.getUint16(5, false),
+      devIndex: (flags & 0x7c) >> 2,
+      unicode,
+      rawHex: toHex(data.slice(i, end)),
+    })
+    i = end
+  }
+  return entries
+}
+
+interface BrowsePageResult {
+  status: number
+  total: number | null
+  /** Raw entry bytes exactly as concatenated from the data frames. */
+  data: Uint8Array
+  /** Reason byte from the device's StopFileBrowse (null if none arrived). */
+  reason: number | null
+}
+
+/**
+ * Listen to every notification on the device's notify characteristics, independent of
+ * conn.notificationQueue. That queue drops device-initiated (flag 0xC0) frames by design,
+ * and is read through a Svelte $state proxy in the app, which can hide raw pushes.
+ * Device-initiated commands are still auto-acked by the connection's own handler.
+ */
+function tapFrames(conn: E87Connection, onFrame: (frame: E87Frame, raw: Uint8Array) => void): () => void {
+  const handler = (event: Event) => {
+    const value = (event.target as BluetoothRemoteGATTCharacteristic).value
+    if (!value) return
+    const raw = new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
+    const frame = parseE87Frame(raw)
+    if (frame) onFrame(frame, raw)
+  }
+  for (const c of conn.notifyChars) c.addEventListener('characteristicvaluechanged', handler)
+  return () => {
+    for (const c of conn.notifyChars) c.removeEventListener('characteristicvaluechanged', handler)
+  }
+}
+
+async function readBrowsePage(
+  conn: E87Connection,
+  log: (msg: string) => void,
+  params: Uint8Array,
+  timeoutMs = 10000,
+): Promise<BrowsePageResult> {
+  const inbox: E87Frame[] = []
+  const untap = tapFrames(conn, (frame, raw) => {
+    log(`BROWSE RX ${toHex(raw)}`)
+    inbox.push(frame)
+  })
+  const waitInbox = async (pred: (f: E87Frame) => boolean, label: string): Promise<E87Frame> => {
+    const started = Date.now()
+    while (Date.now() - started < timeoutMs) {
+      const i = inbox.findIndex(pred)
+      if (i >= 0) return inbox.splice(i, 1)[0]
+      await sleep(20)
+    }
+    throw new Error(`Timeout waiting for ${label}`)
+  }
+
+  try {
+    const seq = nextRcspSeq(conn)
+    const body = new Uint8Array(1 + params.length)
+    body[0] = seq
+    body.set(params, 1)
+    const frame = buildE87Frame(0xc0, 0x0c, body)
+    log(`TX RCSP cmd=0x0c seq=${seq} frame=${toHex(frame)}`)
+    await writeChunkTo(conn.writeChar, frame)
+
+    const ack = await waitInbox((f) => f.cmd === 0x0c && (f.flag & 0x80) === 0, 'StartFileBrowse response (cmd 0x0c)')
+    const status = ack.body[0] ?? 0xff
+    const countBytes = ack.body.slice(2)
+    let total: number | null = null
+    if (countBytes.length > 0 && countBytes.length <= 4) {
+      total = countBytes.reduce((acc, b) => acc * 256 + b, 0)
+    }
+    log(`StartFileBrowse response: status=${RCSP_STATUS_NAMES[status] ?? `0x${status.toString(16)}`} total=${total} body=${toHex(ack.body)}`)
+
+    // Collect pushed entry data until the device sends StopFileBrowse (0x0d). This is read even
+    // when status is non-zero, because the device may send 0x0d with a failure reason.
+    const chunks: Uint8Array[] = []
+    let reason: number | null = null
+    try {
+      for (;;) {
+        const f = await waitInbox(
+          (fr) => (fr.cmd === 0x01 && fr.body[1] === BROWSE_DATA_OPCODE) || (fr.cmd === 0x0d && (fr.flag & 0x80) !== 0),
+          'browse data / StopFileBrowse',
+        )
+        if (f.cmd === 0x01) {
+          const chunk = f.body.slice(2)
+          log(`Browse data frame flag=0x${f.flag.toString(16)} ${chunk.length} bytes`)
+          chunks.push(chunk)
+          continue
+        }
+        reason = f.body[1] ?? null
+        log(`StopFileBrowse from device: reason=${reason} body=${toHex(f.body)}`)
+        break
+      }
+    } catch (err) {
+      log(`Browse: ${(err as Error).message}`)
+    }
+
+    const dataLen = chunks.reduce((n, c) => n + c.length, 0)
+    const data = new Uint8Array(dataLen)
+    let off = 0
+    for (const c of chunks) { data.set(c, off); off += c.length }
+    return { status, total, data, reason }
+  } finally {
+    untap()
+  }
+}
+
+// ─── Storage discovery (GetSysInfo attr 2, "music_dev_status") ───
+
+export interface E87StorageDevice {
+  /** Storage index: 0 USB, 1 SD0, 2 SD1, 3 Flash, 4 LineIn, 5 Flash2, 6 Flash3. */
+  index: number
+  name: string
+  online: boolean
+  /** 4-byte device handle used by the file commands. NOT the same as the index. */
+  handle: number
+}
+
+/**
+ * Parse the storage attribute (JieLi DevStorageInfo). Two layouts:
+ *  - Legacy:   [onlineMask:1] then 4-byte BE handles for indices 0,1,2,3,5 (index 4 has none) [reuse:1]
+ *  - Versioned: [0xFF][version:1] then LTV records [len][type][data]; type 1 holds repeated
+ *               [online:1][index:1][handle:4 BE, only if online]; type 2 holds a reuse flag.
+ */
+export function parseStorageAttr(data: Uint8Array): E87StorageDevice[] {
+  const out: E87StorageDevice[] = []
+  const name = (i: number) => DEV_HANDLER_NAMES[i] ?? `dev${i}`
+  const u32 = (a: Uint8Array, o: number) => ((a[o] << 24) | (a[o + 1] << 16) | (a[o + 2] << 8) | a[o + 3]) >>> 0
+  if (data.length < 1) return out
+  if (data[0] === 0xff) {
+    const ltv = data.slice(2)
+    let i = 0
+    while (i < ltv.length) {
+      const len = ltv[i]
+      if (len < 1 || i + 1 + len > ltv.length) break
+      const type = ltv[i + 1]
+      const val = ltv.slice(i + 2, i + 1 + len)
+      i += 1 + len
+      if (type !== 1) continue
+      let j = 0
+      while (j + 2 <= val.length) {
+        const online = val[j] === 1
+        const index = val[j + 1]
+        if (!online || j + 6 > val.length) {
+          out.push({ index, name: name(index), online, handle: 0 })
+          j += 2
+        } else {
+          out.push({ index, name: name(index), online, handle: u32(val, j + 2) })
+          j += 6
+        }
+      }
+    }
+    return out
+  }
+  let p = 1
+  for (let idx = 0; idx < 6; idx++) {
+    if (idx === 4) continue
+    if (p + 4 > data.length) break
+    out.push({ index: idx, name: name(idx), online: ((data[0] >> idx) & 1) === 1, handle: u32(data, p) })
+    p += 4
+  }
+  return out
+}
+
+/** Ask the device which storages exist/are online and what their file-command handles are. */
+export async function getStorageDevicesE87(
+  conn: E87Connection,
+  log: (msg: string) => void,
+): Promise<E87StorageDevice[]> {
+  await ensureE87Auth(conn, log)
+  const inbox: E87Frame[] = []
+  const untap = tapFrames(conn, (frame, raw) => {
+    log(`SYSINFO RX ${toHex(raw)}`)
+    inbox.push(frame)
+  })
+  try {
+    const seq = nextRcspSeq(conn)
+    // GetSysInfo: function 0xFF (all), mask 4 (storage attribute only), as the app does.
+    const body = Uint8Array.of(seq, 0xff, 0x00, 0x00, 0x00, 0x04)
+    await writeChunkTo(conn.writeChar, buildE87Frame(0xc0, 0x07, body))
+    const started = Date.now()
+    let reply: E87Frame | undefined
+    while (Date.now() - started < 8000 && !reply) {
+      const i = inbox.findIndex((f) => f.cmd === 0x07 && (f.flag & 0x80) === 0)
+      if (i >= 0) reply = inbox.splice(i, 1)[0]
+      else await sleep(20)
+    }
+    if (!reply) throw new Error('Timeout waiting for GetSysInfo response (cmd 0x07)')
+    const status = reply.body[0] ?? 0xff
+    if (status !== 0x00) throw new Error(`GetSysInfo failed with status 0x${status.toString(16)}`)
+    // body = [status][seq][function][attrs: (len)(type)(data)...]
+    const attrs = reply.body.slice(3)
+    let i = 0
+    while (i < attrs.length) {
+      const len = attrs[i]
+      if (len < 1 || i + 1 + len > attrs.length) break
+      const type = attrs[i + 1]
+      const data = attrs.slice(i + 2, i + 1 + len)
+      i += 1 + len
+      if (type === 2) {
+        const devices = parseStorageAttr(data)
+        for (const d of devices) {
+          log(`Storage: index=${d.index} (${d.name}) online=${d.online} handle=0x${d.handle.toString(16)}`)
+        }
+        return devices
+      }
+    }
+    log('GetSysInfo reply had no storage attribute.')
+    return []
+  } finally {
+    untap()
+  }
 }
 
 export async function browseFilesE87(
   conn: E87Connection,
   log: (msg: string) => void,
   options?: {
-    type?: number       // 0=folder, 1=file (default: 1)
-    readNum?: number    // items to read (default: 20)
+    type?: number       // 0 = path is a folder: list its contents, folders and files mixed (default); 1 = path is a file
+    readNum?: number    // entries per page, max 255 (default: 50)
     startIndex?: number // 1-based start (default: 1)
-    devHandler?: number // 0=USB, 1=SD0, 2=SD1, 3=Flash (default: auto-try)
-    clusters?: number[] // path clusters (default: [0] for root)
+    devHandle?: number  // raw 4-byte device handle (default: every online storage from GetSysInfo)
+    clusters?: number[] // path of clusters from the root, e.g. [0] root, [0, 12] a folder (default: [0])
+    maxPages?: number   // safety cap on follow-up pages (default: 20)
   },
 ): Promise<E87FileBrowseEntry[]> {
   await ensureE87Auth(conn, log)
   drainStaleFrames(conn.notificationQueue, log)
 
-  const type = options?.type ?? 1
-  const readNum = options?.readNum ?? 20
-  const startIndex = options?.startIndex ?? 1
+  const type = options?.type ?? 0
+  const readNum = options?.readNum ?? 50
   const clusters = options?.clusters ?? [0]
+  const maxPages = options?.maxPages ?? 20
 
-  // If devHandler specified, try only that; otherwise try all (Flash first)
-  const handlersToTry = options?.devHandler !== undefined
-    ? [options.devHandler]
-    : [3, 2, 1, 0]  // Flash, SD1, SD0, USB
-
-  for (const devHandler of handlersToTry) {
-    drainStaleFrames(conn.notificationQueue, log)
-    try {
-      const ack = await sendFileBrowseRequest(conn, log, type, readNum, startIndex, devHandler, clusters)
-      const status = ack.body[0] ?? 0xff
-      const statusName = RCSP_STATUS_NAMES[status] ?? `0x${status.toString(16)}`
-      log(`FileBrowse[${DEV_HANDLER_NAMES[devHandler] ?? devHandler}]: status=${statusName} body(${ack.body.length})=${toHex(ack.body.slice(0, Math.min(80, ack.body.length)))}`)
-
-      // Give device a moment, then drain any StopFileBrowse commands it sends
-      await sleep(200)
-      drainStaleFrames(conn.notificationQueue, log)
-
-      if (status !== 0x00) {
-        log(`FileBrowse[${DEV_HANDLER_NAMES[devHandler] ?? devHandler}]: ${statusName} — skipping.`)
-        continue
-      }
-
-      const payload = ack.body.slice(2)
-      if (payload.length === 0) {
-        log(`FileBrowse[${DEV_HANDLER_NAMES[devHandler] ?? devHandler}]: success but empty payload.`)
-        continue
-      }
-
-      const entries = parseFileBrowseResponse(payload, type, log)
-      if (entries.length > 0) {
-        log(`FileBrowse[${DEV_HANDLER_NAMES[devHandler] ?? devHandler}]: found ${entries.length} entries.`)
-        return entries
-      }
-    } catch (err) {
-      log(`FileBrowse[${DEV_HANDLER_NAMES[devHandler] ?? devHandler}]: ${(err as Error).message}`)
+  let targets: Array<{ handle: number; label: string }>
+  if (options?.devHandle !== undefined) {
+    targets = [{ handle: options.devHandle, label: `handle 0x${options.devHandle.toString(16)}` }]
+  } else {
+    const devices = await getStorageDevicesE87(conn, log)
+    targets = devices.filter((d) => d.online).map((d) => ({ handle: d.handle, label: `${d.name} (handle 0x${d.handle.toString(16)})` }))
+    if (targets.length === 0) {
+      log('FileBrowse: device reports no online storage.')
+      return []
     }
   }
 
-  log('FileBrowse: no entries found on any storage device.')
+  for (const target of targets) {
+    const all: E87FileBrowseEntry[] = []
+    let startIndex = options?.startIndex ?? 1
+    try {
+      for (let page = 0; page < maxPages; page++) {
+        drainStaleFrames(conn.notificationQueue, log)
+        const res = await readBrowsePage(conn, log, buildBrowseParams(type, readNum, startIndex, target.handle, clusters))
+        if (res.status !== 0x00) {
+          log(`FileBrowse[${target.label}]: status 0x${res.status.toString(16)} - skipping.`)
+          break
+        }
+        log(`FileBrowse[${target.label}]: page ${page + 1} raw (${res.data.length}B): ${toHex(res.data)}`)
+        const entries = parseBrowseEntries(res.data)
+        for (const e of entries) e.handle = target.handle
+        all.push(...entries)
+        for (const e of entries) {
+          log(`FileBrowse[${target.label}]: ${e.isFolder ? '[DIR]' : '[FILE]'} "${e.name}" cluster=${e.cluster} fileNum=${e.fileNum}`)
+        }
+        // reason 0 = more pages remain; 1 = complete; anything else ends the listing.
+        if (res.reason !== 0 || entries.length === 0) break
+        startIndex += entries.length
+      }
+    } catch (err) {
+      log(`FileBrowse[${target.label}]: ${(err as Error).message}`)
+    }
+    if (all.length > 0) return all
+  }
+
+  log('FileBrowse: no entries found.')
   drainStaleFrames(conn.notificationQueue, log)
   return []
 }
 
-function parseFileBrowseResponse(payload: Uint8Array, queryType: number, log: (msg: string) => void): E87FileBrowseEntry[] {
-  const entries: E87FileBrowseEntry[] = []
-  if (payload.length < 2) {
-    log(`FileBrowse: empty response (${payload.length} bytes)`)
-    return entries
-  }
+/**
+ * Delete a file or folder on the device (RCSP cmd 0x1F, DelDevFileCmd), as the official app does.
+ *
+ * Body after the seq byte: [last:1] [handle:4 BE] [type:1] [cluster:4 BE]
+ *   last: 1 when this is the final item of a batch delete (always 1 for a single delete)
+ *   type: 1 = file, 0 = folder
+ * Response (flag 0x00): body = [status][seq]; status 0 = success.
+ * Deletion is permanent. Re-list the folder afterwards to see the result.
+ */
+export async function deleteFileE87(
+  conn: E87Connection,
+  log: (msg: string) => void,
+  target: { handle: number; cluster: number; isFile: boolean; last?: boolean },
+): Promise<void> {
+  await ensureE87Auth(conn, log)
+  const inbox: E87Frame[] = []
+  const untap = tapFrames(conn, (frame, raw) => {
+    log(`DELETE RX ${toHex(raw)}`)
+    inbox.push(frame)
+  })
+  try {
+    const seq = nextRcspSeq(conn)
+    const body = new Uint8Array(11)
+    const view = new DataView(body.buffer)
+    body[0] = seq
+    body[1] = target.last === false ? 0 : 1
+    view.setUint32(2, target.handle >>> 0, false)
+    body[6] = target.isFile ? 1 : 0
+    view.setUint32(7, target.cluster >>> 0, false)
+    const frame = buildE87Frame(0xc0, 0x1f, body)
+    log(`TX RCSP cmd=0x1f seq=${seq} frame=${toHex(frame)}`)
+    await writeChunkTo(conn.writeChar, frame)
 
-  // Try to parse as a sequence of entries
-  // The response format varies by device, so try multiple parsing strategies
-  log(`FileBrowse: parsing ${payload.length} bytes of response data`)
-  log(`FileBrowse: raw hex: ${toHex(payload.slice(0, Math.min(120, payload.length)))}`)
-
-  // Strategy 1: try to decode as UTF-16LE name entries
-  // Each entry might be: [cluster:4 BE][size:4 BE][name_len:1][name:UTF16LE]
-  let i = 0
-  let entryCount = 0
-  while (i < payload.length) {
-    // Need at least 9 bytes for cluster + size + name_len
-    if (i + 9 > payload.length) break
-    const cluster = ((payload[i] << 24) | (payload[i+1] << 16) | (payload[i+2] << 8) | payload[i+3]) >>> 0
-    const sizeBytes = ((payload[i+4] << 24) | (payload[i+5] << 16) | (payload[i+6] << 8) | payload[i+7]) >>> 0
-    const nameLen = payload[i+8]
-    if (nameLen === 0 || i + 9 + nameLen > payload.length) break
-    // Try decoding name as UTF-16LE
-    const nameRaw = payload.slice(i + 9, i + 9 + nameLen)
-    let name: string
-    try {
-      // If nameLen is even, try UTF-16LE; otherwise treat as UTF-8
-      if (nameLen >= 2 && nameLen % 2 === 0) {
-        name = new TextDecoder('utf-16le').decode(nameRaw).replace(/\0+$/, '')
-      } else {
-        name = new TextDecoder().decode(nameRaw).replace(/\0+$/, '')
+    const started = Date.now()
+    while (Date.now() - started < 8000) {
+      const i = inbox.findIndex((f) => f.cmd === 0x1f && (f.flag & 0x80) === 0)
+      if (i >= 0) {
+        const status = inbox[i].body[0] ?? 0xff
+        log(`DelDevFile response: status=${RCSP_STATUS_NAMES[status] ?? `0x${status.toString(16)}`} body=${toHex(inbox[i].body)}`)
+        if (status !== 0x00) throw new Error(`Delete failed with status 0x${status.toString(16)}`)
+        return
       }
-    } catch {
-      name = toHex(nameRaw)
+      await sleep(20)
     }
-    entries.push({
-      name,
-      isFolder: queryType === 0,
-      sizeBytes,
-      cluster,
-      rawHex: toHex(payload.slice(i, i + 9 + nameLen)),
-    })
-    entryCount++
-    i += 9 + nameLen
-    if (entryCount > 100) break
+    throw new Error('Timeout waiting for delete response (cmd 0x1f)')
+  } finally {
+    untap()
   }
-
-  if (entries.length === 0) {
-    // Strategy 2: Just log the raw data for now
-    log(`FileBrowse: could not parse structured entries, raw payload logged above`)
-  } else {
-    for (const e of entries) {
-      log(`FileBrowse: ${e.isFolder ? '[DIR]' : '[FILE]'} "${e.name}" size=${e.sizeBytes} cluster=${e.cluster}`)
-    }
-  }
-
-  return entries
 }
 
 /**

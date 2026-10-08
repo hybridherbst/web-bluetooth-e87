@@ -16,10 +16,11 @@ devices (sold as "E87", "L8", "LED Smart Badge", etc.) over **Bluetooth Low Ener
 4. [Upload Flow — Phase by Phase](#upload-flow--phase-by-phase)
 5. [Data Transfer Details](#data-transfer-details)
 6. [Completion Handshake](#completion-handshake)
-7. [CRC-16 XMODEM](#crc-16-xmodem)
-8. [Constants & Magic Numbers](#constants--magic-numbers)
-9. [Capture File Format (Apple PacketLogger `.pklg`)](#capture-file-format-apple-packetlogger-pklg)
-10. [Diagrams](#diagrams)
+7. [Device File Browse](#device-file-browse)
+8. [CRC-16 XMODEM](#crc-16-xmodem)
+9. [Constants & Magic Numbers](#constants--magic-numbers)
+10. [Capture File Format (Apple PacketLogger `.pklg`)](#capture-file-format-apple-packetlogger-pklg)
+11. [Diagrams](#diagrams)
 
 ---
 
@@ -374,6 +375,135 @@ Captured path: `\U32\020260215004530.jpg` (UTF-16LE + null terminator = 40 bytes
 ```
 body = [0x00, echoed_seq]
 ```
+
+---
+
+## Device File Browse
+
+The FE-framed protocol is JieLi's **RCSP** (the same wire format as the JieLi Android SDK,
+`com.jieli.jl_rcsp` / `jl_filebrowse`). Besides uploading, the badge can list its files.
+Verified on a real E87 badge (storage SD1, folder `BAG`).
+
+### 1. Find the storage handle — `GetSysInfo` (cmd `0x07`)
+
+File commands address a storage by a 4-byte **handle**, which is *not* the storage index.
+Ask the device which storages are online:
+
+```
+TX: FE DC BA C0 07 00 06  [seq] FF 00 00 00 04  EF       function=0xFF, mask=4 (storage attr)
+RX: FE DC BA 00 07 00 1E  00 [seq] FF  1A 02 <25 bytes>  EF
+                          status,seq,fn  len,type=2
+```
+
+Attribute type `2` payload (legacy layout): `[onlineMask:1]` then 4-byte big-endian handles for
+indices 0, 1, 2, 3, 5 (index 4 has none), then a reuse flag. Index: `0` USB, `1` SD0, `2` SD1,
+`3` Flash, `4` LineIn, `5` Flash2, `6` Flash3. A newer layout starts with `0xFF <version>` followed by
+LTV records (`type 1` = repeated `[online][index][handle:4 if online]`); both are handled in
+`parseStorageAttr()`.
+
+Captured: mask `0x04`, handles `00000000 00000000 00000002 ...` — only **SD1** is online, handle `2`.
+
+### 2. List a folder — `StartFileBrowse` (cmd `0x0C`)
+
+```
+TX: FE DC BA C0 0C <len> [seq] [type] [readNum] [startIndex:2 BE] [handle:4 BE] [pathLen:2 BE] [path...] EF
+```
+
+| Field | Size | Notes |
+|---|---|---|
+| type | 1 | `0` = the path is a **folder** (list its contents — folders and files mixed); `1` = the path is a file |
+| readNum | 1 | Max entries for this page (e.g. 50) |
+| startIndex | 2 BE | 1-based index of the first entry |
+| handle | 4 BE | From `GetSysInfo` above |
+| pathLen | 2 **BE** | Bytes of path, `4 * clusters` |
+| path | 4 each BE | Cluster numbers from the root: `[0]` is the root, `[0, 2]` is the folder with cluster 2 |
+
+Captured request (list folder `BAG` on handle 2): `... C0 0C 00 13 | 06 | 00 32 00 01 00000002 0008 00000000 00000002 EF`
+
+The response (flag `0x00`) is only `[status][seq]` — it carries no entries and, on the E87, no count.
+
+### 3. Entries are pushed as data frames, then the device ends the page
+
+The device sends one or more **data frames** (cmd `0x01`, flag `0x80`):
+
+```
+FE DC BA 80 01 <len> [seq] 0C <entry bytes...> EF         (0x0C is the xmOpCode: browse data)
+```
+
+then a **StopFileBrowse** (cmd `0x0D`, flag `0xC0`, body `[seq][reason]`), which the host must ack with
+`FE DC BA 00 0D 00 02 00 [seq] EF`:
+
+| reason | Meaning |
+|---|---|
+| `0` | Page done, more entries remain (request again with `startIndex += count`) — verified |
+| `1` | Listing complete |
+| `2` | Seen when the request was wrong (e.g. type `1` on a folder) — not a successful end |
+| other | Failure code |
+
+Concatenate the data-frame payloads (`body[2:]`) and parse as `FileStruct` records. The device never
+splits a record across frames.
+
+**Paging** (verified): `startIndex` is the 1-based file number of the first entry wanted, so ask for
+the next page with `startIndex += entriesReceived`. Listing 12 files with `readNum = 5`:
+
+| Request (`readNum`, `startIndex`) | Entries | Stop reason |
+|---|---|---|
+| `0005`, `0001` | 5 (fileNum 1–5) | `0` — more remain |
+| `0005`, `0006` | 5 (fileNum 6–10) | `0` — more remain |
+| `0005`, `000B` | 2 (fileNum 11–12) | `1` — complete |
+
+When the file count is an exact multiple of `readNum` (12 files, `readNum = 6`), the last full page
+is already marked `1` (complete); there is no empty trailing page.
+
+### 4. Entry (`FileStruct`) format
+
+```
+[flags:1] [cluster:4 BE] [fileNum:2 BE] [nameLen:1] [name: nameLen bytes]
+```
+
+| flags bit | Meaning |
+|---|---|
+| 0 | `1` = file, `0` = folder |
+| 1 | `0` = name is UTF-16LE, `1` = name is GBK |
+| 2–6 | Storage index (`(flags & 0x7C) >> 2`) |
+
+`cluster` is the entry's cluster number — use it to descend into a folder (append it to `path`) or,
+later, to address the file. `fileNum` is its 1-based position in the folder. There is **no size field**.
+
+Captured root entry: `0A 00000002 0001 03 424147` → folder `BAG`, cluster 2, GBK.
+Captured file entry: `09 00000003 0001 24 3200300032003600...` → file, cluster 3, UTF-16LE `20260329091508.jpg`.
+
+The official app lists the root, opens the folder named `BAG`, and shows its files.
+
+### 5. Delete a file — `DelDevFile` (cmd `0x1F`)
+
+```
+TX: FE DC BA C0 1F 00 0B [seq] [last:1] [handle:4 BE] [type:1] [cluster:4 BE] EF
+RX: FE DC BA 00 1F 00 02 00 [seq] EF                                          status 0 = success
+```
+
+`type` is `1` for a file, `0` for a folder. `last` is `1` for a single delete (the official app
+sets it only on the final item when it deletes several in a row). `cluster` comes from the browse
+entry. Verified on a real badge — captured request deleting the file at cluster 3 on handle 2:
+`FE DC BA C0 1F 00 0B 05 01 00000002 01 00000003 EF`, response `00 05`.
+
+Notes:
+- Deletion is immediate and permanent.
+- `fileNum` is just the 1-based position in the folder, so the remaining entries are **renumbered**
+  after a delete. The cluster is the stable identifier.
+- The official app sends only this command (it does not send the optional pre-step the SDK offers).
+
+### Not yet verified on the badge
+
+From the SDK (formats known, behaviour on the E87 not tested): `0x23` delete by name
+(`[0x00][name]`), `0x22` format, `0xF2` file-structure-change notification.
+
+**`0x24` read file from device crashes the E87.** Sending the SDK's read-by-cluster request
+(`C0 24 00 0E [seq] 01 [handle:4] [offset:4] [cluster:4]`) produced no reply, and the badge's firmware
+then panicked and rebooted, dropping the BLE connection. Do not send it. The SDK's read-by-name
+variants are untested and may do the same. There is **no rename command** in the SDK or the official app; the only "rename" in the
+protocol is `0x20` (`LargeFileTransferGetName`), which adds a `001`, `002`… suffix when an upload's
+file name collides.
 
 ---
 
