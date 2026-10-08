@@ -16,10 +16,11 @@ devices (sold as "E87", "L8", "LED Smart Badge", etc.) over **Bluetooth Low Ener
 4. [Upload Flow — Phase by Phase](#upload-flow--phase-by-phase)
 5. [Data Transfer Details](#data-transfer-details)
 6. [Completion Handshake](#completion-handshake)
-7. [CRC-16 XMODEM](#crc-16-xmodem)
-8. [Constants & Magic Numbers](#constants--magic-numbers)
-9. [Capture File Format (Apple PacketLogger `.pklg`)](#capture-file-format-apple-packetlogger-pklg)
-10. [Diagrams](#diagrams)
+7. [Image Sequences, Videos and Patterns (AVI Timing)](#image-sequences-videos-and-patterns-avi-timing)
+8. [CRC-16 XMODEM](#crc-16-xmodem)
+9. [Constants & Magic Numbers](#constants--magic-numbers)
+10. [Capture File Format (Apple PacketLogger `.pklg`)](#capture-file-format-apple-packetlogger-pklg)
+11. [Diagrams](#diagrams)
 
 ---
 
@@ -374,6 +375,25 @@ Captured path: `\U32\020260215004530.jpg` (UTF-16LE + null terminator = 40 bytes
 ```
 body = [0x00, echoed_seq]
 ```
+
+---
+
+## Image Sequences, Videos and Patterns (AVI Timing)
+
+Sequences, videos and generated patterns are uploaded as one **MJPEG AVI** file, using the same upload
+steps as a single `.jpg`. Each AVI frame is an ordinary JPEG; the playback speed lives in the AVI
+header, not in any separate command.
+
+| Header field | Written as | Used by the badge? |
+|---|---|---|
+| `avih.dwMicroSecPerFrame` | `round(1_000_000 / fps)` | **Yes — this sets the frame time** |
+| `strh.dwScale` / `strh.dwRate` | `1` / `fps` (whole rates), or `1000` / `round(fps × 1000)` (fractional) | No |
+| `vprp.dwVerticalRefreshRate` | `max(1, round(fps))` | No |
+
+Verified on an E87: a file whose `avih` said 1 s per frame while `dwScale/dwRate` said 4 s played at 1 s
+per frame, and a file with `dwRate = 0` but a correct `avih` played at the right speed. `fps` may be
+fractional: `0.25` shows each frame for 4 seconds (the official app asks for seconds per image and
+passes `1 / seconds` to ffmpeg the same way).
 
 ---
 

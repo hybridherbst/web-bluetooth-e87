@@ -62,6 +62,7 @@
     interChunkDelayMs?: number
     videoFps?: number
     sequenceFps?: number
+    sequenceSeconds?: number
     patternFrameCount?: number
     patternFps?: number
     qrUrl?: string
@@ -142,7 +143,9 @@
   let previewUrl: string | null = $state(null)
 
   let videoFps = $state(n(saved.videoFps, 12))
-  let sequenceFps = $state(n(saved.sequenceFps, 1))
+  // Seconds per image. Older saved settings stored an fps value instead.
+  let sequenceSeconds = $state(n(saved.sequenceSeconds, saved.sequenceFps ? 1 / saved.sequenceFps : 1))
+  const sequenceFps = $derived(sequenceSeconds > 0 ? 1 / sequenceSeconds : 1)
   let videoTrimStart = $state(0)
   let videoTrimEnd = $state(0)
   let videoDuration = $state(0)
@@ -596,7 +599,7 @@
       uploadMode,
       interChunkDelayMs,
       videoFps,
-      sequenceFps,
+      sequenceSeconds,
       patternFrameCount,
       patternFps,
       qrUrl,
@@ -901,7 +904,7 @@
       const signature = [
         'images',
         filesSig,
-        sequenceFps,
+        sequenceSeconds,
         sequenceScale.toFixed(3),
         sequencePanX.toFixed(3),
         sequencePanY.toFixed(3),
@@ -1154,7 +1157,7 @@
       if (uploadMode === 'images') {
         if (sequenceLiveFrames.length === 0) throw new Error('No images selected')
         avi = await previewBitmapsToAvi(sequenceLiveFrames, sequenceFps, getTransform('images'), log, getOutputFrameSize())
-        label = `${sequenceLiveFrames.length} cached images @ ${sequenceFps}fps`
+        label = `${sequenceLiveFrames.length} cached images, ${sequenceSeconds}s each`
       } else if (uploadMode === 'video') {
         if (videoLiveFrames.length === 0) throw new Error('No video selected')
         avi = await previewBitmapsToAvi(videoLiveFrames, videoFps, getTransform('video'), log, getOutputFrameSize())
@@ -1438,7 +1441,7 @@
       <SequenceMode
         {isWriting}
         {selectedFiles}
-        bind:sequenceFps
+        bind:sequenceSeconds
         onSelectFiles={setMultipleFiles}
       />
 

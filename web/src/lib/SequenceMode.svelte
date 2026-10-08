@@ -6,13 +6,13 @@
   interface Props {
     isWriting: boolean
     selectedFiles: File[]
-    sequenceFps: number
+    sequenceSeconds: number
     onSelectFiles: (event: Event) => void
   }
 
   let {
     isWriting, selectedFiles,
-    sequenceFps = $bindable(), onSelectFiles,
+    sequenceSeconds = $bindable(), onSelectFiles,
   }: Props = $props()
 </script>
 
@@ -28,13 +28,13 @@
 
 <div class="settings">
   <label>
-    <span>Display time per image (fps)</span>
-    <input type="number" min="1" max="30" step="1" bind:value={sequenceFps} disabled={isWriting} />
+    <span>Display time per image (seconds)</span>
+    <input type="number" min="0.03" max="60" step="0.1" bind:value={sequenceSeconds} disabled={isWriting} />
   </label>
 </div>
 <p class="dim" style="font-size:0.8rem;margin:0.2rem 0">
-  {#if sequenceFps === 1}Each image shows for 1 second
-  {:else}Each image shows for {(1/sequenceFps).toFixed(2)}s ({sequenceFps} fps)
+  {#if sequenceSeconds > 0}Each image shows for {sequenceSeconds} second{sequenceSeconds === 1 ? '' : 's'} ({(1 / sequenceSeconds).toFixed(2)} fps)
+  {:else}Enter a time greater than zero.
   {/if}
 </p>
 

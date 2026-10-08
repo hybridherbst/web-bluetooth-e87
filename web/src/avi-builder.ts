@@ -76,8 +76,22 @@ function makeList(type: string, ...children: Uint8Array[]): Uint8Array {
 export interface AviOptions {
   width?: number
   height?: number
-  /** Frames per second (default 1 for image sequences, 12 for video) */
+  /**
+   * Frames per second (default 1 for image sequences, 12 for video). May be fractional:
+   * 0.25 shows each frame for 4 seconds.
+   */
   fps?: number
+}
+
+/**
+ * Express a frame rate as the AVI stream header's dwRate / dwScale pair. Whole rates keep the
+ * historical 1-based form; fractional rates use millisecond precision (e.g. 0.25 fps becomes
+ * 250 / 1000) so the header stays valid for any AVI reader.
+ */
+export function aviRate(fps: number): { scale: number; rate: number } {
+  if (!Number.isFinite(fps) || fps <= 0) throw new Error(`Invalid frame rate: ${fps}`)
+  if (Number.isInteger(fps)) return { scale: 1, rate: fps }
+  return { scale: 1000, rate: Math.max(1, Math.round(fps * 1000)) }
 }
 
 /**
@@ -95,6 +109,9 @@ export function buildMjpgAvi(
   const height = options.height ?? 368
   const fps = options.fps ?? (frames.length <= 6 ? 1 : 12)
 
+  const { scale, rate } = aviRate(fps)
+  // The badge takes each frame's display time from avih.dwMicroSecPerFrame and ignores the
+  // stream header's dwScale/dwRate (verified on hardware), so this is the field that matters.
   const usecPerFrame = Math.round(1_000_000 / fps)
   const maxFrameSize = frames.reduce((m, f) => Math.max(m, f.length), 0)
   const totalFrames = frames.length
@@ -123,8 +140,8 @@ export function buildMjpgAvi(
     u16le(0),                     // wPriority
     u16le(0),                     // wLanguage
     u32le(0),                     // dwInitialFrames
-    u32le(1),                     // dwScale
-    u32le(fps),                   // dwRate
+    u32le(scale),                 // dwScale
+    u32le(rate),                  // dwRate
     u32le(0),                     // dwStart
     u32le(totalFrames),           // dwLength
     u32le(maxFrameSize),          // dwSuggestedBufferSize
@@ -172,7 +189,7 @@ export function buildMjpgAvi(
   const vprpData = concat(
     u32le(0),                     // VideoFormatToken
     u32le(0),                     // VideoStandard
-    u32le(fps),                   // dwVerticalRefreshRate
+    u32le(Math.max(1, Math.round(fps))), // dwVerticalRefreshRate (whole Hz)
     u32le(width),                 // dwHTotalInT
     u32le(height),                // dwVTotalInLines
     u32le(1 | (1 << 16)),         // dwFrameAspectRatio (1:1)
