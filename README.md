@@ -16,10 +16,11 @@ devices (sold as "E87", "L8", "LED Smart Badge", etc.) over **Bluetooth Low Ener
 4. [Upload Flow — Phase by Phase](#upload-flow--phase-by-phase)
 5. [Data Transfer Details](#data-transfer-details)
 6. [Completion Handshake](#completion-handshake)
-7. [CRC-16 XMODEM](#crc-16-xmodem)
-8. [Constants & Magic Numbers](#constants--magic-numbers)
-9. [Capture File Format (Apple PacketLogger `.pklg`)](#capture-file-format-apple-packetlogger-pklg)
-10. [Diagrams](#diagrams)
+7. [Free Storage](#free-storage)
+8. [CRC-16 XMODEM](#crc-16-xmodem)
+9. [Constants & Magic Numbers](#constants--magic-numbers)
+10. [Capture File Format (Apple PacketLogger `.pklg`)](#capture-file-format-apple-packetlogger-pklg)
+11. [Diagrams](#diagrams)
 
 ---
 
@@ -374,6 +375,24 @@ Captured path: `\U32\020260215004530.jpg` (UTF-16LE + null terminator = 40 bytes
 ```
 body = [0x00, echoed_seq]
 ```
+
+---
+
+## Free Storage
+
+The badge reports its **free storage in KB** as `memory` in the badge-info reply. It is read over the Qix side channel
+(write `9E CA 02 C6 01 00 01` to `FD02`, answered on the `FD0x` notify characteristics by a `0xC7` frame) and can be requested at any
+time, with or without the RCSP auth handshake. The reply payload is `[01][width:2][height:2][pictureWidth:2][pictureHeight:2][memory:4]`
+(little-endian), for example `01 68 01 68 01 70 01 70 01 44 08 00 00` = 360×360 screen, 368×368 pictures, 2116 KB free.
+
+- Every value seen is a multiple of 4, i.e. **free clusters × 4 KB**.
+- A file larger than the free space is **accepted through the whole transfer** and only rejected at the end: the badge sends `0x1C`
+  with status `0x03` (data/CRC error) and never sends `0x20`.
+- Measured: uploading a 131,090-byte file (33 clusters of data) lowered the free space from 2252 KB to 2116 KB, i.e. 34 clusters (one more than the
+  data needs), while a 26,693-byte file (7 clusters) lowered it from 3416 KB to 3388 KB, i.e. exactly 7. So the check assumes one extra cluster to be safe.
+
+The app reads the free space on connect, re-reads it before and after every upload, shows it, and warns before sending a file that
+is expected not to fit (it asks for confirmation rather than blocking, because the one-cluster allowance is conservative and has only been measured twice).
 
 ---
 

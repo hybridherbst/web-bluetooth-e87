@@ -1417,7 +1417,7 @@ export async function stopBrowseE87(conn: E87Connection, log: (msg: string) => v
 export async function getScreenInfoE87(
   conn: E87Connection,
   log: (msg: string) => void,
-): Promise<{ width: number; height: number; pictureWidth: number; pictureHeight: number; memory: number } | null> {
+): Promise<{ width: number; height: number; pictureWidth: number; pictureHeight: number; memory: number | null } | null> {
   try {
     const resp = await sendQixCommandAndWait(conn, 0xc6, Uint8Array.of(0x01), 0xc7, log, 5000)
     if (resp.payload.length >= 9 && resp.payload[0] === 0x01) {
@@ -1425,9 +1425,10 @@ export async function getScreenInfoE87(
       const height = resp.payload[3] | (resp.payload[4] << 8)
       const pictureWidth = resp.payload[5] | (resp.payload[6] << 8)
       const pictureHeight = resp.payload[7] | (resp.payload[8] << 8)
+      // Free storage in KB; null when the reply is too short to carry it (so 0 can mean "full").
       const memory = resp.payload.length >= 13
         ? (resp.payload[9] | (resp.payload[10] << 8) | (resp.payload[11] << 16) | (resp.payload[12] << 24)) >>> 0
-        : 0
+        : null
       log(`ScreenInfo: ${width}x${height} pic=${pictureWidth}x${pictureHeight} mem=${memory}`)
       return { width, height, pictureWidth, pictureHeight, memory }
     }

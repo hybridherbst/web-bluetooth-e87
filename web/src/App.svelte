@@ -32,6 +32,7 @@
     type E87SmallFileEntry,
     type E87FileBrowseEntry,
   } from './lib/e87-protocol'
+  import { checkFreeSpace } from './lib/storage'
   import { buildMjpgAvi } from './avi-builder'
   import type { PatternDef } from './pattern-generators'
   import QRCode from 'qrcode'
@@ -54,7 +55,7 @@
     height: number
     pictureWidth: number
     pictureHeight: number
-    memory: number
+    memory: number | null
   }
 
   type SavedSettings = {
@@ -113,7 +114,9 @@
 
   const debugMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('debug')
 
-  let conn: E87Connection | null = $state(null)
+  // $state.raw: the connection holds a live notification queue that its BLE handler pushes onto. Behind a deep
+  // $state proxy, code that reads the queue through `conn` never sees those pushes and its waits time out.
+  let conn: E87Connection | null = $state.raw(null)
   let isConnecting = $state(false)
   let isWriting = $state(false)
   let cancelRequested = $state(false)
@@ -121,6 +124,7 @@
 
   let status = $state('Disconnected')
   let batteryLevel: number | null = $state(null)
+  let freeSpaceKb: number | null = $state(null)
   let batteryUpdatedAt = $state('')
   let screenWidth = $state<number | null>(null)
   let screenHeight = $state<number | null>(null)
@@ -283,6 +287,7 @@
       try {
         const info = await getScreenInfoE87(nextConn, log)
         applyScreenInfo(info)
+        freeSpaceKb = info?.memory ?? null
       } catch { /* best effort */ }
       conn = nextConn
       status = `Connected: ${nextConn.device.name ?? 'Unknown device'}`
@@ -305,6 +310,7 @@
     }
     batteryLevel = null
     batteryUpdatedAt = ''
+    freeSpaceKb = null
     screenWidth = null
     screenHeight = null
     pictureWidth = E87_IMAGE_WIDTH
@@ -1253,6 +1259,15 @@
 
   // ─── Upload orchestration ───
 
+  /** Re-read the badge's free storage (best effort). */
+  async function refreshFreeSpace(): Promise<void> {
+    if (!conn) return
+    try {
+      const info = await getScreenInfoE87(conn, log)
+      if (info) freeSpaceKb = info.memory
+    } catch { /* best effort */ }
+  }
+
   async function startUpload(): Promise<void> {
     if (!conn) {
       status = 'Not connected.'
@@ -1296,6 +1311,23 @@
         throw new Error(`File too large: ${formatBytes(payload.length)} exceeds ${formatBytes(MAX_UPLOAD_BYTES)} limit.`)
       }
 
+      // A file larger than the free space is only rejected at the very end of the transfer, so check first.
+      await refreshFreeSpace()
+      if (freeSpaceKb !== null) {
+        const check = checkFreeSpace(freeSpaceKb, payload.length)
+        if (!check.fits) {
+          const proceed = window.confirm(
+            `This file is ${formatBytes(payload.length)} and needs about ${check.neededKb} KB on the badge, ` +
+            `but the badge reports only ${check.freeKb} KB free. The upload will probably fail at the end.\n\nUpload anyway?`,
+          )
+          if (!proceed) {
+            status = 'Upload cancelled: not enough free space on the badge.'
+            log(status)
+            return
+          }
+        }
+      }
+
       if (uploadModeForDevice === 'image') {
         revokePreviewUrl()
         previewUrl = URL.createObjectURL(makeBlob(payload, 'image/jpeg'))
@@ -1322,6 +1354,7 @@
       progress = 100
       const elapsed = formatDuration((Date.now() - uploadStartTime) / 1000)
       status = `Upload completed in ${elapsed}.`
+      void refreshFreeSpace()
     } catch (error) {
       status = `Upload failed: ${(error as Error).message}`
       log(status)
@@ -1352,6 +1385,12 @@
     <div class="status">Status: {status}</div>
     {#if batteryLevel !== null}
       <div class="status">Battery: {batteryLevel}% <span class="dim">({batteryUpdatedAt})</span></div>
+    {/if}
+    {#if freeSpaceKb !== null}
+      <div class="status">
+        Free space: {freeSpaceKb} KB
+        <button class="secondary" onclick={refreshFreeSpace} disabled={!conn || isWriting}>↻ Refresh</button>
+      </div>
     {/if}
 
   </section>
