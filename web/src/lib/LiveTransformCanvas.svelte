@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { frameRect } from './frame-layout'
+
   interface Props {
     frames: ImageBitmap[]
     fps: number
@@ -42,15 +44,12 @@
     if (!ctx) return
 
     const frame = frames[Math.min(idx, frames.length - 1)]
-    const drawW = canvas.width * scale
-    const drawH = canvas.height * scale
-    const dx = (canvas.width - drawW) / 2 + panX * (canvas.width / 2)
-    const dy = (canvas.height - drawH) / 2 + panY * (canvas.height / 2)
+    const rect = frameRect(frame.width, frame.height, canvas.width, canvas.height, { scale, panX, panY })
 
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.fillStyle = backdropColor
     ctx.fillRect(0, 0, canvas.width, canvas.height)
-    ctx.drawImage(frame, dx, dy, drawW, drawH)
+    ctx.drawImage(frame, rect.x, rect.y, rect.width, rect.height)
 
     ctx.save()
     ctx.globalCompositeOperation = 'destination-in'
@@ -127,10 +126,10 @@
 
   function onPointerMove(event: PointerEvent): void {
     if (!dragging || !canvas) return
-    const dx = (event.clientX - dragStartX) / (canvas.width / 2)
-    const dy = (event.clientY - dragStartY) / (canvas.height / 2)
-    panX = clamp(dragStartPanX + dx, -1.5, 1.5)
-    panY = clamp(dragStartPanY + dy, -1.5, 1.5)
+    const dx = (event.clientX - dragStartX) / (canvas.clientWidth / 2)
+    const dy = (event.clientY - dragStartY) / (canvas.clientHeight / 2)
+    panX = dragStartPanX + dx
+    panY = dragStartPanY + dy
     drawFrame(frameIndex)
   }
 
@@ -146,7 +145,9 @@
     if (disabled || frames.length === 0) return
     event.preventDefault()
     const direction = event.deltaY > 0 ? -1 : 1
-    scale = clamp(scale + direction * 0.08, 0.5, 4)
+    const frame = frames[Math.min(frameIndex, frames.length - 1)]
+    const fitScale = Math.min(frame.width / frame.height, frame.height / frame.width)
+    scale = clamp(scale + direction * 0.08, Math.min(0.5, fitScale), 4)
     drawFrame(frameIndex)
   }
 

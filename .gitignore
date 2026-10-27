@@ -14,3 +14,17 @@ cap.btsnoop
 cap.pklg
 cap.txt
 cap-extended*
+node_modules/
+web/dist/
+release/
+.DS_Store
+
+release-windows/
+release-linux/
+
+.build-cache/
+desktop/bin/
+
+web/dist-desktop/
+src-tauri/target/
+src-tauri/gen/

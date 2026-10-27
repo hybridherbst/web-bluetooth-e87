@@ -1,0 +1,24 @@
+{
+  "name": "e87-studio",
+  "version": "1.0.0-beta.3",
+  "private": true,
+  "description": "Offline Bluetooth studio for E87 circular badges",
+  "author": "E87 Studio contributors",
+  "license": "MIT",
+  "workspaces": [
+    "web"
+  ],
+  "scripts": {
+    "start": "tauri dev",
+    "build": "npm run build --workspace web -- --mode desktop",
+    "check": "npm run check --workspace web && node --experimental-strip-types --test desktop/*.test.mjs",
+    "dist": "tauri build",
+    "dist:mac": "tauri build --bundles dmg",
+    "dist:win": "tauri build --bundles nsis",
+    "dist:linux": "tauri build --bundles deb",
+    "build:web": "npm run build --workspace web"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.3"
+  }
+}

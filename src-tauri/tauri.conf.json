@@ -1,0 +1,72 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "E87 Studio",
+  "version": "1.0.0-beta.3",
+  "identifier": "local.e87.studio",
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev --workspace web -- --mode desktop --port 1420",
+    "devUrl": "http://localhost:1420/desktop.html",
+    "frontendDist": "../web/dist-desktop"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "E87 Studio",
+        "url": "desktop.html",
+        "create": false,
+        "width": 920,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 600,
+        "center": true,
+        "backgroundColor": "#101010"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost blob:; object-src 'none'; base-uri 'self'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "dmg",
+      "nsis",
+      "deb"
+    ],
+    "category": "GraphicsAndDesign",
+    "shortDescription": "Native Bluetooth editor for E87 badges",
+    "copyright": "E87 Studio contributors; original protocol by Felix Herbst (MIT)",
+    "icon": [
+      "../desktop/assets/icon.png",
+      "../desktop/assets/icon.icns",
+      "../desktop/assets/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "-",
+      "infoPlist": "Info.plist"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libdbus-1-3",
+          "bluez"
+        ]
+      }
+    },
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
+    }
+  }
+}

@@ -6,6 +6,8 @@
  */
 
 import { buildMjpgAvi } from '../avi-builder'
+import { canvasToBadgeJpeg } from './image-encoding'
+import { frameRect, previewDimensions } from './frame-layout'
 import { formatBytes } from './utils'
 
 export const E87_IMAGE_WIDTH = 368
@@ -32,39 +34,18 @@ const DEFAULT_TRANSFORM: TransformSettings = {
   panY: 0,
 }
 
-function cropToSquare(bitmap: ImageBitmap): { sx: number, sy: number, sw: number, sh: number } {
-  const srcRatio = bitmap.width / bitmap.height
-  const targetRatio = 1
-  let sx = 0
-  let sy = 0
-  let sw = bitmap.width
-  let sh = bitmap.height
-  if (srcRatio > targetRatio) {
-    sw = Math.round(bitmap.height * targetRatio)
-    sx = Math.floor((bitmap.width - sw) / 2)
-  } else {
-    sh = Math.round(bitmap.width / targetRatio)
-    sy = Math.floor((bitmap.height - sh) / 2)
-  }
-  return { sx, sy, sw, sh }
-}
-
 function renderTransformedFrame(
   ctx: OffscreenCanvasRenderingContext2D,
-  source: CanvasImageSource,
+  source: ImageBitmap,
   width: number,
   height: number,
   transform: TransformSettings,
 ): void {
-  const { scale, panX, panY } = transform
-  const drawW = width * scale
-  const drawH = height * scale
-  const dx = (width - drawW) / 2 + panX * (width / 2)
-  const dy = (height - drawH) / 2 + panY * (height / 2)
+  const rect = frameRect(source.width, source.height, width, height, transform)
 
   ctx.fillStyle = transform.backdropColor ?? 'black'
   ctx.fillRect(0, 0, width, height)
-  ctx.drawImage(source, dx, dy, drawW, drawH)
+  ctx.drawImage(source, rect.x, rect.y, rect.width, rect.height)
 }
 
 async function squareBitmapToJpeg(
@@ -80,8 +61,7 @@ async function squareBitmapToJpeg(
   if (!ctx) throw new Error('Could not create 2D canvas context.')
 
   renderTransformedFrame(ctx, bitmap, width, height, transform)
-  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
-  return new Uint8Array(await blob.arrayBuffer())
+  return canvasToBadgeJpeg(canvas, quality)
 }
 
 /**
@@ -101,7 +81,7 @@ export async function imageFileTo368JpegBytes(file: File): Promise<Uint8Array> {
     sy = Math.floor((bitmap.height - sh) / 2)
   }
 
-  async function toJpegBlob(quality: number): Promise<Blob | null> {
+  async function toJpegBytes(quality: number): Promise<Uint8Array> {
     if ('OffscreenCanvas' in window) {
       const canvas = new OffscreenCanvas(E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
       const ctx = canvas.getContext('2d')
@@ -109,7 +89,7 @@ export async function imageFileTo368JpegBytes(file: File): Promise<Uint8Array> {
       ctx.fillStyle = 'black'
       ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
       ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
-      return canvas.convertToBlob({ type: 'image/jpeg', quality })
+      return canvasToBadgeJpeg(canvas, quality)
     }
     const canvas = document.createElement('canvas')
     canvas.width = E87_IMAGE_WIDTH
@@ -119,36 +99,36 @@ export async function imageFileTo368JpegBytes(file: File): Promise<Uint8Array> {
     ctx.fillStyle = 'black'
     ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
     ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
-    return new Promise<Blob | null>((resolve) => {
-      canvas.toBlob((result) => resolve(result), 'image/jpeg', quality)
-    })
+    return canvasToBadgeJpeg(canvas, quality)
   }
 
   const qualitySteps = [0.88, 0.8, 0.72, 0.64, 0.56, 0.48, 0.4, 0.34]
-  let blob: Blob | null = null
+  let jpeg: Uint8Array | null = null
   for (const q of qualitySteps) {
-    const candidate = await toJpegBlob(q)
-    if (!candidate) continue
-    blob = candidate
-    if (candidate.size <= E87_TARGET_IMAGE_BYTES) break
+    jpeg = await toJpegBytes(q)
+    if (jpeg.length <= E87_TARGET_IMAGE_BYTES) break
   }
   bitmap.close()
-  if (!blob) throw new Error('Image conversion failed (no JPEG blob).')
-  return new Uint8Array(await blob.arrayBuffer())
+  if (!jpeg) throw new Error('Image conversion failed (no JPEG bytes).')
+  return jpeg
 }
 
-export async function imageFileToPreviewBitmap(file: File, size = LIVE_PREVIEW_SIZE): Promise<ImageBitmap> {
+export async function imageFileToPreviewBitmap(file: File, size = 4096): Promise<ImageBitmap> {
   const bitmap = await createImageBitmap(file)
-  const { sx, sy, sw, sh } = cropToSquare(bitmap)
-  const canvas = new OffscreenCanvas(size, size)
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Could not create 2D canvas context.')
-  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, size, size)
-  bitmap.close()
-  return createImageBitmap(canvas)
+  try {
+    const { width, height } = previewDimensions(bitmap.width, bitmap.height, size)
+    const canvas = new OffscreenCanvas(width, height)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Could not create 2D canvas context.')
+    // Cache the whole photograph. The circular crop is applied only when drawing/exporting.
+    ctx.drawImage(bitmap, 0, 0, width, height)
+    return await createImageBitmap(canvas)
+  } finally {
+    bitmap.close()
+  }
 }
 
-export async function imagesToPreviewBitmaps(files: File[], size = LIVE_PREVIEW_SIZE): Promise<ImageBitmap[]> {
+export async function imagesToPreviewBitmaps(files: File[], size = 1024): Promise<ImageBitmap[]> {
   const out: ImageBitmap[] = []
   for (const file of files) {
     out.push(await imageFileToPreviewBitmap(file, size))
@@ -178,7 +158,7 @@ export async function previewBitmapsToAvi(
     frames.push(await squareBitmapToJpeg(bitmaps[i], transform, 0.88, outputSize))
     if ((i + 1) % 25 === 0) log?.(`  Encoded ${i + 1}/${bitmaps.length} frames...`)
   }
-  const avi = buildMjpgAvi(frames, { fps })
+  const avi = buildMjpgAvi(frames, { fps, ...outputSize })
   log?.(`AVI built from cache: ${formatBytes(avi.length)}`)
   return avi
 }
@@ -205,8 +185,7 @@ export async function imageFileTo368JpegFrame(file: File, quality = 0.88): Promi
   ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
   ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
   bitmap.close()
-  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
-  return new Uint8Array(await blob.arrayBuffer())
+  return canvasToBadgeJpeg(canvas, quality)
 }
 
 /**
@@ -369,8 +348,7 @@ export async function videoToAvi(
     ctx.fillRect(0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
     ctx.drawImage(video, sx, sy, zoomedSize, zoomedSize, 0, 0, E87_IMAGE_WIDTH, E87_IMAGE_HEIGHT)
 
-    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.88 })
-    frames.push(new Uint8Array(await blob.arrayBuffer()))
+    frames.push(await canvasToBadgeJpeg(canvas, 0.88))
 
     if (frames.length % 10 === 0) log?.(`  Extracted ${frames.length} frames...`)
   }

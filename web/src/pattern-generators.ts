@@ -6,6 +6,8 @@
  * identical so the device plays a seamless loop at any frame-count/fps.
  */
 
+import { canvasToBadgeJpeg } from './lib/image-encoding'
+
 const SIZE = 368
 const HALF = SIZE / 2
 const RADIUS = HALF - 2
@@ -47,8 +49,7 @@ function circularMask(ctx: OffscreenCanvasRenderingContext2D) {
 }
 
 async function toJpeg(canvas: OffscreenCanvas, quality = 0.9): Promise<Uint8Array> {
-  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
-  return new Uint8Array(await blob.arrayBuffer())
+  return canvasToBadgeJpeg(canvas, quality)
 }
 
 /** Attempt to freeze a seeded PRNG state for reproducibility. */

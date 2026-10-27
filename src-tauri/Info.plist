@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>E87 Studio uses Bluetooth to connect to the badge you select and transfer images and animations.</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>Bluetooth is required to connect to your E87 badge.</string>
+</dict></plist>
